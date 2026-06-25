@@ -1,0 +1,47 @@
+# Ignore everything by default, then allow only files intended for the public
+# repository.
+*
+
+!/.gitignore
+!/LICENSE
+!/Makefile
+!/Package.swift
+!/README.md
+
+!/Assets/
+!/Assets/AppIcon.iconset/
+!/Assets/AppIcon.iconset/*.png
+!/Assets/IconConcepts/
+!/Assets/IconConcepts/*.png
+
+!/Resources/
+!/Resources/BirdMenu.icns
+!/Resources/Info.plist
+
+!/Sources/
+!/Sources/BirdMenu/
+!/Sources/BirdMenu/*.swift
+
+!/Tests/
+!/Tests/BirdMenuTests/
+!/Tests/BirdMenuTests/*.swift
+
+!/Tools/
+!/Tools/*.js
+
+!/docs/
+!/docs/*.md
+
+# Local build products and generated runtime data.
+.build/
+build/
+logs/
+*.btsnoop
+*.pklg
+*.xcarchive
+*.dSYM/
+
+# User and system metadata.
+.DS_Store
+*.swp
+*.tmp
