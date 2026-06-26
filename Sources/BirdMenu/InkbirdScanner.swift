@@ -290,10 +290,10 @@ private final class HistoryFetchOperation: @unchecked Sendable {
     private let completion: (Result<InkbirdHistoryResult, Error>) -> Void
     private let historyCommands: [Command] = [
         Command(name: "temp_header", value: Data([0x02]), quietTimeout: 0.8, maxTimeout: 5, readAfterWrite: true),
-        Command(name: "temp_content", value: Data([0x01]), quietTimeout: 1.2, maxTimeout: 30, readAfterWrite: true),
+        Command(name: "temp_content", value: Data([0x01]), quietTimeout: 5, maxTimeout: 180, readAfterWrite: true),
         Command(name: "temp_content_crc", value: Data([0x07]), quietTimeout: 0.8, maxTimeout: 5, readAfterWrite: true),
         Command(name: "hum_header", value: Data([0x04]), quietTimeout: 0.8, maxTimeout: 5, readAfterWrite: true),
-        Command(name: "hum_content", value: Data([0x03]), quietTimeout: 1.2, maxTimeout: 30, readAfterWrite: true),
+        Command(name: "hum_content", value: Data([0x03]), quietTimeout: 5, maxTimeout: 180, readAfterWrite: true),
         Command(name: "hum_content_crc", value: Data([0x08]), quietTimeout: 0.8, maxTimeout: 5, readAfterWrite: true)
     ]
 
@@ -339,7 +339,7 @@ private final class HistoryFetchOperation: @unchecked Sendable {
         BirdMenuLog.debugData("history.operation connect id=\(peripheral.identifier.uuidString) name=\(peripheral.name ?? "-")")
         peripheral.delegate = nil
         centralManager.connect(peripheral)
-        operationTimer = Timer.scheduledTimer(withTimeInterval: 150, repeats: false) { [weak self] _ in
+        operationTimer = Timer.scheduledTimer(withTimeInterval: 900, repeats: false) { [weak self] _ in
             self?.fail(HistoryFetchError.timedOut("history operation"))
         }
     }
@@ -590,6 +590,7 @@ private final class HistoryFetchOperation: @unchecked Sendable {
         }
         maxTimer = Timer.scheduledTimer(withTimeInterval: command.maxTimeout, repeats: false) { [weak self] _ in
             self?.warnings.append("Timed out while waiting for \(command.name); continuing with the next command.")
+            BirdMenuLog.debugData("history.command maxTimeout name=\(command.name)")
             self?.finishCurrentCommand()
         }
     }
@@ -603,6 +604,9 @@ private final class HistoryFetchOperation: @unchecked Sendable {
             return
         }
         quietTimer = Timer.scheduledTimer(withTimeInterval: currentAttempt.command.quietTimeout, repeats: false) { [weak self] _ in
+            if let commandName = self?.currentAttempt?.command.name {
+                BirdMenuLog.debugData("history.command quietTimeout name=\(commandName)")
+            }
             self?.finishCurrentCommand()
         }
     }
@@ -694,8 +698,8 @@ private final class HistoryFetchOperation: @unchecked Sendable {
                 command: Command(
                     name: "ith11b_history_command_01",
                     value: Data([0x01]),
-                    quietTimeout: 0.08,
-                    maxTimeout: 30,
+                    quietTimeout: 8,
+                    maxTimeout: 600,
                     readAfterWrite: false
                 ),
                 characteristic: configCharacteristic
@@ -704,8 +708,8 @@ private final class HistoryFetchOperation: @unchecked Sendable {
                 command: Command(
                     name: "ith11b_history_command_04",
                     value: Data([0x04]),
-                    quietTimeout: 1.5,
-                    maxTimeout: 30,
+                    quietTimeout: 3,
+                    maxTimeout: 60,
                     readAfterWrite: false
                 ),
                 characteristic: configCharacteristic

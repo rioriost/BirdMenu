@@ -1,4 +1,7 @@
 APP_NAME := BirdMenu
+APP_BUNDLE_ID := st.rio.birdmenu
+APP_VERSION := 1.0
+APP_BUILD := 3
 BUILD_DIR := .build/release
 APP_DIR := build/$(APP_NAME).app
 CONTENTS_DIR := $(APP_DIR)/Contents
@@ -14,6 +17,11 @@ SCRUB_XATTRS := xattr -dr com.apple.provenance "$(STAGING_APP_DIR)" 2>/dev/null 
 	xattr -dr com.apple.FinderInfo "$(STAGING_APP_DIR)" 2>/dev/null || true; \
 	xattr -dr "com.apple.fileprovider.fpfs\#P" "$(STAGING_APP_DIR)" 2>/dev/null || true; \
 	xattr -cr "$(STAGING_APP_DIR)"
+SCRUB_APP_XATTRS := xattr -dr com.apple.provenance "$(APP_DIR)" 2>/dev/null || true; \
+	xattr -dr com.apple.macl "$(APP_DIR)" 2>/dev/null || true; \
+	xattr -dr com.apple.FinderInfo "$(APP_DIR)" 2>/dev/null || true; \
+	xattr -dr "com.apple.fileprovider.fpfs\#P" "$(APP_DIR)" 2>/dev/null || true; \
+	xattr -cr "$(APP_DIR)"
 
 .PHONY: build test app run clean
 
@@ -30,12 +38,20 @@ app: build
 	mkdir -p "$(STAGING_MACOS_DIR)" "$(STAGING_RESOURCES_DIR)"
 	cp "$(BUILD_DIR)/$(APP_NAME)" "$(STAGING_MACOS_DIR)/$(APP_NAME)"
 	cp Resources/Info.plist "$(STAGING_CONTENTS_DIR)/Info.plist"
+	plutil -replace CFBundleDevelopmentRegion -string en "$(STAGING_CONTENTS_DIR)/Info.plist"
+	plutil -replace CFBundleExecutable -string "$(APP_NAME)" "$(STAGING_CONTENTS_DIR)/Info.plist"
+	plutil -replace CFBundleIdentifier -string "$(APP_BUNDLE_ID)" "$(STAGING_CONTENTS_DIR)/Info.plist"
+	plutil -replace CFBundleName -string "$(APP_NAME)" "$(STAGING_CONTENTS_DIR)/Info.plist"
+	plutil -replace CFBundleShortVersionString -string "$(APP_VERSION)" "$(STAGING_CONTENTS_DIR)/Info.plist"
+	plutil -replace CFBundleVersion -string "$(APP_BUILD)" "$(STAGING_CONTENTS_DIR)/Info.plist"
 	cp Resources/BirdMenu.icns "$(STAGING_RESOURCES_DIR)/BirdMenu.icns"
 	$(SCRUB_XATTRS)
 	codesign --force --sign - "$(STAGING_APP_DIR)"
 	$(SCRUB_XATTRS)
 	mkdir -p build
 	ditto --noextattr --norsrc "$(STAGING_APP_DIR)" "$(APP_DIR)"
+	$(SCRUB_APP_XATTRS)
+	codesign --force --sign - "$(APP_DIR)"
 	@echo "$(APP_DIR)"
 
 run: app

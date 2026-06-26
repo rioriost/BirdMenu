@@ -203,10 +203,11 @@ enum InkbirdHistoryExportWriter {
         intervalSeconds: Int?,
         latestReading: InkbirdReading?
     ) -> [InkbirdHistoryRecord] {
-        let records = packets
+        let data = packets
             .filter { $0.command == "ith11b_history_command_01" }
             .compactMap { Data(hexString: $0.hex) }
-            .flatMap(decodeITH11BPayload)
+            .reduce(Data(), +)
+        let records = decodeITH11BPayload(data)
 
         guard !records.isEmpty else {
             return []

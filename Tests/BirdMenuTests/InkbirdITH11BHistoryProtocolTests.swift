@@ -58,3 +58,32 @@ import Testing
     #expect(records.first?.timestamp == Date(timeIntervalSince1970: 9_640))
     #expect(records.last?.timestamp == Date(timeIntervalSince1970: 10_000))
 }
+
+@Test func decodesITH11BHistoryPayloadAcrossNotificationBoundaries() {
+    let packets = [
+        InkbirdHistoryPacket(
+            command: "ith11b_history_command_01",
+            characteristicUUID: "FFF6",
+            timestamp: Date(timeIntervalSince1970: 1_000),
+            hex: "fd006f02fd"
+        ),
+        InkbirdHistoryPacket(
+            command: "ith11b_history_command_01",
+            characteristicUUID: "FFF6",
+            timestamp: Date(timeIntervalSince1970: 1_001),
+            hex: "006d0200000000"
+        )
+    ]
+
+    let records = InkbirdHistoryExportWriter.decodeITH11BRecords(
+        packets: packets,
+        intervalSeconds: nil,
+        latestReading: nil
+    )
+
+    #expect(records.count == 2)
+    #expect(records[0].temperatureCelsius == 25.3)
+    #expect(records[0].humidityPercent == 62.3)
+    #expect(records[1].temperatureCelsius == 25.3)
+    #expect(records[1].humidityPercent == 62.1)
+}
