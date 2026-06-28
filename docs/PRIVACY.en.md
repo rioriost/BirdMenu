@@ -1,8 +1,8 @@
 # BirdMenu Privacy Policy
 
-Last updated: June 25, 2026
+Last updated: June 29, 2026
 
-BirdMenu is a macOS menu bar app for displaying readings from INKBIRD ITH-11-B Bluetooth Low Energy thermometer/hygrometer devices.
+BirdMenu is a macOS menu bar app for displaying readings from compatible Bluetooth Low Energy thermometer/hygrometer sensors.
 
 ## Summary
 
@@ -12,7 +12,7 @@ All Bluetooth readings and history files are processed and stored locally on you
 
 ## Data Processed Locally
 
-BirdMenu may process the following data from nearby INKBIRD ITH-11-B devices:
+BirdMenu may process the following data from nearby compatible sensors:
 
 - temperature
 - humidity
@@ -36,6 +36,7 @@ These files may include:
 
 - `raw-history.json`
 - `history.csv`
+- `history.png`
 
 If debug logging is enabled in the app menu, BirdMenu may also write received Bluetooth readings and packet details to macOS Unified Logging. These logs remain on your Mac and are managed by macOS.
 
@@ -49,7 +50,7 @@ BirdMenu does not require an internet connection for its app functionality.
 
 ## Bluetooth Permission
 
-BirdMenu requests Bluetooth access so it can discover and communicate with INKBIRD ITH-11-B devices.
+BirdMenu requests Bluetooth access so it can discover and communicate with compatible sensors.
 
 ## Data Deletion
 
@@ -71,4 +72,4 @@ For privacy questions, open an issue at:
 
 https://github.com/rioriost/birdmenu/issues
 
-BirdMenu is not affiliated with INKBIRD.
+Compatibility testing has been performed with INKBIRD ITH-11-B hardware. BirdMenu is not affiliated with or endorsed by INKBIRD.

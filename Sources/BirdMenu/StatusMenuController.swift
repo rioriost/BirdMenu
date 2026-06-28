@@ -7,8 +7,8 @@ final class StatusMenuController {
     private let scanner = InkbirdScanner()
     private let menu = NSMenu()
     private let statusItemText = NSMenuItem(title: "Status: Starting", action: nil, keyEquivalent: "")
-    private let displayItem = NSMenuItem(title: "Display: All Devices", action: nil, keyEquivalent: "")
-    private let deviceItem = NSMenuItem(title: "Device: --", action: nil, keyEquivalent: "")
+    private let displayItem = NSMenuItem(title: "Display: All Sensors", action: nil, keyEquivalent: "")
+    private let deviceItem = NSMenuItem(title: "Sensor: --", action: nil, keyEquivalent: "")
     private let temperatureItem = NSMenuItem(title: "Temperature: --", action: nil, keyEquivalent: "")
     private let humidityItem = NSMenuItem(title: "Humidity: --", action: nil, keyEquivalent: "")
     private let batteryItem = NSMenuItem(title: "Battery: --", action: nil, keyEquivalent: "")
@@ -26,7 +26,6 @@ final class StatusMenuController {
     private var timer: Timer?
     private var isFetchingHistory = false
     private var historyStatus = "History: Not fetched"
-    private var latestHistoryFolderURL: URL?
     private var isDebugLoggingEnabled: Bool {
         get {
             UserDefaults.standard.bool(forKey: BirdMenuLog.debugLoggingDefaultsKey)
@@ -99,7 +98,7 @@ final class StatusMenuController {
 
     @objc private func fetchHistory() {
         guard let reading = historyTargetReading() else {
-            showAlert(title: "No Device Selected", message: "Select a specific ITH-11-B, or wait until exactly one device is detected.")
+            showAlert(title: "No Sensor Selected", message: "Select a specific sensor, or wait until exactly one compatible sensor is detected.")
             return
         }
         isFetchingHistory = true
@@ -113,12 +112,12 @@ final class StatusMenuController {
                 self.isFetchingHistory = false
                 switch result {
                 case let .success(history):
-                    self.latestHistoryFolderURL = history.folderURL
                     if let csvURL = history.csvURL {
                         self.historyStatus = "History: \(history.recordCount) records"
+                        let pngLine = history.pngURL.map { "\nPNG: \($0.path)" } ?? ""
                         self.showAlert(
                             title: "History Fetch Complete",
-                            message: "Saved \(history.recordCount) decoded records and \(history.packetCount) raw packets.\n\nCSV: \(csvURL.path)\nRaw: \(history.rawURL.path)"
+                            message: "Saved \(history.recordCount) decoded records and \(history.packetCount) raw packets.\n\nCSV: \(csvURL.path)\(pngLine)\nRaw: \(history.rawURL.path)"
                         )
                     } else {
                         self.historyStatus = "History: raw only"
@@ -137,10 +136,14 @@ final class StatusMenuController {
     }
 
     @objc private func openLatestHistoryFolder() {
-        guard let latestHistoryFolderURL else {
+        let historyFolderURL = Self.historyRootFolderURL()
+        do {
+            try FileManager.default.createDirectory(at: historyFolderURL, withIntermediateDirectories: true)
+        } catch {
+            showAlert(title: "Could Not Open History Folder", message: error.localizedDescription)
             return
         }
-        NSWorkspace.shared.open(latestHistoryFolderURL)
+        NSWorkspace.shared.open(historyFolderURL)
     }
 
     @objc private func toggleDebugLogging() {
@@ -166,8 +169,8 @@ final class StatusMenuController {
 
     private func updateDetailItems() {
         guard let snapshot = selectedSnapshot() else {
-            displayItem.title = selectedPeripheralID == nil ? "Display: All Devices" : "Display: Missing Device"
-            deviceItem.title = "Device: ITH-11-B"
+            displayItem.title = selectedPeripheralID == nil ? "Display: All Sensors" : "Display: Missing Sensor"
+            deviceItem.title = "Sensor: --"
             temperatureItem.title = "Temperature: --"
             humidityItem.title = "Humidity: --"
             batteryItem.title = "Battery: --"
@@ -177,8 +180,8 @@ final class StatusMenuController {
             return
         }
 
-        displayItem.title = snapshot.isAggregate ? "Display: All Devices" : "Display: \(snapshot.label)"
-        deviceItem.title = "Device: \(snapshot.label)"
+        displayItem.title = snapshot.isAggregate ? "Display: All Sensors" : "Display: \(snapshot.label)"
+        deviceItem.title = "Sensor: \(snapshot.label)"
         temperatureItem.title = "Temperature: \(Self.formatTemperature(snapshot.temperatureCelsius))"
         humidityItem.title = "Humidity: \(Self.formatHumidity(snapshot.humidityPercent))"
         batteryItem.title = snapshot.batteryPercent.map { "Battery: \($0)%" } ?? "Battery: --"
@@ -201,7 +204,7 @@ final class StatusMenuController {
         menu.addItem(historyItem)
         menu.addItem(NSMenuItem.separator())
 
-        let allDevicesItem = NSMenuItem(title: "All Devices", action: #selector(selectAllDevices), keyEquivalent: "")
+        let allDevicesItem = NSMenuItem(title: "All Sensors", action: #selector(selectAllDevices), keyEquivalent: "")
         allDevicesItem.target = self
         allDevicesItem.state = selectedPeripheralID == nil ? .on : .off
         menu.addItem(allDevicesItem)
@@ -215,14 +218,13 @@ final class StatusMenuController {
         }
 
         menu.addItem(NSMenuItem.separator())
-        let fetchHistoryItem = NSMenuItem(title: "Fetch Device History (Experimental)", action: #selector(fetchHistory), keyEquivalent: "h")
+        let fetchHistoryItem = NSMenuItem(title: "Fetch Sensor History (Experimental)", action: #selector(fetchHistory), keyEquivalent: "h")
         fetchHistoryItem.target = self
         fetchHistoryItem.isEnabled = !isFetchingHistory && historyTargetReading() != nil
         menu.addItem(fetchHistoryItem)
 
-        let openHistoryFolderItem = NSMenuItem(title: "Open Latest History Folder", action: #selector(openLatestHistoryFolder), keyEquivalent: "")
+        let openHistoryFolderItem = NSMenuItem(title: "Open History Folder", action: #selector(openLatestHistoryFolder), keyEquivalent: "")
         openHistoryFolderItem.target = self
-        openHistoryFolderItem.isEnabled = latestHistoryFolderURL != nil
         menu.addItem(openHistoryFolderItem)
 
         menu.addItem(NSMenuItem.separator())
@@ -246,7 +248,7 @@ final class StatusMenuController {
         }
 
         guard let snapshot = selectedSnapshot() else {
-            let status = selectedPeripheralID == nil ? "Scanning for ITH-11-B" : "Selected ITH-11-B has not been seen"
+            let status = selectedPeripheralID == nil ? "Scanning for compatible sensors" : "Selected sensor has not been seen"
             return ("--.-°C --%", .systemOrange, status, "BirdMenu: \(status)")
         }
 
@@ -284,7 +286,7 @@ final class StatusMenuController {
         let averageHumidity = humidities.isEmpty ? nil : humidities.reduce(0, +) / Double(humidities.count)
 
         return DisplaySnapshot(
-            label: "All Devices (\(readings.count))",
+            label: "All Sensors (\(readings.count))",
             temperatureCelsius: averageTemperature,
             humidityPercent: averageHumidity,
             batteryPercent: nil,
@@ -319,11 +321,16 @@ final class StatusMenuController {
     }
 
     private func deviceLabel(for reading: InkbirdReading) -> String {
-        "\(reading.deviceName) \(Self.shortID(reading.peripheralID))"
+        "Sensor \(Self.shortID(reading.peripheralID))"
     }
 
     private static func shortID(_ uuid: UUID) -> String {
         String(uuid.uuidString.replacingOccurrences(of: "-", with: "").suffix(4)).uppercased()
+    }
+
+    private static func historyRootFolderURL() -> URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("BirdMenu Logs", isDirectory: true)
     }
 
     private static func statusImage(color: NSColor) -> NSImage {

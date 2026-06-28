@@ -29,8 +29,8 @@
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>INKBIRD ITH-11-BのBLE広告とGATT通信を利用して温度、湿度、電池残量、履歴をメニューバーに表示・保存します。</string>
+	<string>対応するBluetooth温湿度センサーのBLE広告とGATT通信を利用して、温度、湿度、電池残量、履歴をメニューバーに表示・保存します。</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
-	<string>INKBIRD ITH-11-BのBLE広告とGATT通信を利用して温度、湿度、電池残量、履歴をメニューバーに表示・保存します。</string>
+	<string>対応するBluetooth温湿度センサーのBLE広告とGATT通信を利用して、温度、湿度、電池残量、履歴をメニューバーに表示・保存します。</string>
 </dict>
 </plist>

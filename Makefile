@@ -1,7 +1,7 @@
 APP_NAME := BirdMenu
 APP_BUNDLE_ID := st.rio.birdmenu
-APP_VERSION := 1.0
-APP_BUILD := 3
+APP_VERSION := 1.1.1
+APP_BUILD := 5
 BUILD_DIR := .build/release
 APP_DIR := build/$(APP_NAME).app
 CONTENTS_DIR := $(APP_DIR)/Contents

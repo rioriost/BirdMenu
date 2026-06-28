@@ -240,11 +240,11 @@ enum HistoryFetchError: LocalizedError {
         case .busy:
             "Another history fetch is already running."
         case .peripheralNotFound:
-            "The selected ITH-11-B is not available. Wait for a fresh advertisement and try again."
+            "The selected sensor is not available. Wait for a fresh advertisement and try again."
         case .connectionFailed:
-            "Could not connect to the selected ITH-11-B."
+            "Could not connect to the selected sensor."
         case .serviceNotFound:
-            "The INKBIRD service was not found."
+            "The expected Bluetooth service was not found."
         case .historyCharacteristicNotFound:
             "The history characteristic fff8 was not found."
         case .disconnected:
@@ -426,14 +426,14 @@ private final class HistoryFetchOperation: @unchecked Sendable {
             modeName = "ith11b-official-trace"
             shouldDecodeHistory = true
             warnings.append(
-                "Using the experimental ITH-11-B offline-history command sequence observed from the official INKBIRD app trace."
+                "Using the experimental offline-history command sequence observed from a compatible sensor app trace."
             )
         } else {
             transferMode = .readOnlySnapshot
             modeName = "read-only-gatt-snapshot"
             shouldDecodeHistory = false
             warnings.append(
-                "FFF8 was not found on this ITH-11-B. Saved a full GATT snapshot without writing unknown history commands."
+                "FFF8 was not found on this sensor. Saved a full GATT snapshot without writing unknown history commands."
             )
             BirdMenuLog.debugData("history.operation noHistoryCommandMode mode=readOnlyGattSnapshot")
         }
