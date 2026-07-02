@@ -70,6 +70,6 @@ If you choose to share analytics or crash reports with Apple at the system level
 
 For privacy questions, open an issue at:
 
-https://github.com/rioriost/birdmenu/issues
+https://github.com/rioriost/BirdMenu/issues
 
 Compatibility testing has been performed with INKBIRD ITH-11-B hardware. BirdMenu is not affiliated with or endorsed by INKBIRD.
