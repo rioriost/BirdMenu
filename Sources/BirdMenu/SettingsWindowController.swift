@@ -9,10 +9,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let temperatureUnitLabel = NSTextField(labelWithString: "")
     private let temperatureUnitControl = NSSegmentedControl(labels: ["", ""], trackingMode: .selectOne, target: nil, action: nil)
     private let debugLoggingCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    private let historyChartDateLabel = NSTextField(labelWithString: "")
+    private let historyChartDatePicker = NSDatePicker()
+    private let generateHistoryChartButton = NSButton(title: "", target: nil, action: nil)
 
     init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 380, height: 178),
+            contentRect: NSRect(x: 0, y: 0, width: 440, height: 238),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -46,6 +49,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         temperatureUnitControl.selectedSegment = TemperatureUnit.current == .celsius ? 0 : 1
         debugLoggingCheckbox.title = AppText.debugLogging
         debugLoggingCheckbox.state = BirdMenuLog.isDebugLoggingEnabled ? .on : .off
+        historyChartDateLabel.stringValue = AppText.historyChartDate
+        generateHistoryChartButton.title = AppText.generateHistoryChart
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -68,13 +73,27 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         debugLoggingCheckbox.target = self
         debugLoggingCheckbox.action = #selector(toggleDebugLogging)
 
+        historyChartDatePicker.datePickerElements = [.yearMonthDay]
+        historyChartDatePicker.datePickerMode = .single
+        historyChartDatePicker.datePickerStyle = .textFieldAndStepper
+        historyChartDatePicker.dateValue = Date()
+
+        generateHistoryChartButton.target = self
+        generateHistoryChartButton.action = #selector(generateHistoryChart)
+
         let unitRow = NSStackView(views: [temperatureUnitLabel, temperatureUnitControl])
         unitRow.orientation = .horizontal
         unitRow.alignment = .centerY
         unitRow.distribution = .gravityAreas
         unitRow.spacing = 14
 
-        let stack = NSStackView(views: [launchAtLoginCheckbox, unitRow, debugLoggingCheckbox])
+        let historyChartRow = NSStackView(views: [historyChartDateLabel, historyChartDatePicker, generateHistoryChartButton])
+        historyChartRow.orientation = .horizontal
+        historyChartRow.alignment = .centerY
+        historyChartRow.distribution = .gravityAreas
+        historyChartRow.spacing = 12
+
+        let stack = NSStackView(views: [launchAtLoginCheckbox, unitRow, debugLoggingCheckbox, historyChartRow])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 18
@@ -108,12 +127,38 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         onChange?()
     }
 
-    private func showAlert(title: String, message: String) {
+    private func showAlert(title: String, message: String, style: NSAlert.Style = .warning) {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message
-        alert.alertStyle = .warning
+        alert.alertStyle = style
         alert.addButton(withTitle: AppText.ok)
         alert.beginSheetModal(for: window!)
+    }
+
+    @objc private func generateHistoryChart() {
+        do {
+            let result = try InkbirdHistoryChartRenderer.writePNGForLocalDay(
+                containing: historyChartDatePicker.dateValue,
+                historyRoot: InkbirdHistoryExportWriter.historyRootFolderURL()
+            )
+            showAlert(
+                title: AppText.historyChartGeneratedTitle,
+                message: Self.historyChartGeneratedMessage(result),
+                style: .informational
+            )
+        } catch {
+            showAlert(
+                title: AppText.historyChartGenerationFailedTitle,
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    private static func historyChartGeneratedMessage(_ result: InkbirdHistoryChartGenerationResult) -> String {
+        if AppText.isJapanese {
+            return "\(result.recordCount)件のCSVレコードからPNGを生成しました。\n\nPNG: \(result.pngURL.path)\nCSV: \(result.csvURLs.count)ファイル"
+        }
+        return "Generated a PNG from \(result.recordCount) CSV records.\n\nPNG: \(result.pngURL.path)\nCSV: \(result.csvURLs.count) files"
     }
 }

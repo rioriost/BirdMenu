@@ -232,6 +232,57 @@ import Testing
     }
 }
 
+@Test func writesHistoryPNGForSelectedLocalDayFromExistingCSVs() throws {
+    let timeZone = try #require(TimeZone(identifier: "Asia/Tokyo"))
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = timeZone
+    let selectedDate = try #require(calendar.date(from: DateComponents(
+        timeZone: timeZone,
+        year: 2026,
+        month: 7,
+        day: 2,
+        hour: 12
+    )))
+    let folder = FileManager.default.temporaryDirectory
+        .appendingPathComponent("BirdMenuTests-\(UUID().uuidString)", isDirectory: true)
+    let firstFetch = folder.appendingPathComponent("2026-07-02T01-00-00Z-Sensor-AAAAAA", isDirectory: true)
+    let secondFetch = folder.appendingPathComponent("2026-07-03T01-00-00Z-Sensor-AAAAAA", isDirectory: true)
+    try FileManager.default.createDirectory(at: firstFetch, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: secondFetch, withIntermediateDirectories: true)
+    defer {
+        try? FileManager.default.removeItem(at: folder)
+    }
+
+    try """
+    timestamp,index,temperature_c,humidity_percent
+    2026-07-01T15:00:00Z,0,23.10,70.00
+    2026-07-02T12:00:00Z,1,24.20,71.00
+    """.write(to: firstFetch.appendingPathComponent("history.csv"), atomically: true, encoding: .utf8)
+    try """
+    timestamp,index,temperature_c,humidity_percent
+    2026-07-02T13:00:00Z,0,24.40,72.00
+    2026-07-03T01:00:00Z,1,25.00,73.00
+    """.write(to: secondFetch.appendingPathComponent("history.csv"), atomically: true, encoding: .utf8)
+
+    let result = try InkbirdHistoryChartRenderer.writePNGForLocalDay(
+        containing: selectedDate,
+        historyRoot: folder,
+        timeZone: timeZone
+    )
+
+    #expect(result.dayStart == calendar.date(from: DateComponents(
+        timeZone: timeZone,
+        year: 2026,
+        month: 7,
+        day: 2
+    )))
+    #expect(result.recordCount == 3)
+    #expect(result.csvURLs.count == 2)
+    #expect(result.pngURL == folder.appendingPathComponent("history_20260702.png"))
+    let data = try Data(contentsOf: result.pngURL)
+    #expect(data.starts(with: Data([0x89, 0x50, 0x4e, 0x47])))
+}
+
 @Test func decodesITH11BInitialRTDTHHistoryWithFallbackIntervalAndDeduplication() {
     let rtdthHex = "7274647468de00e703610084080000000000e703"
         + String(repeating: "e500e703", count: 14)

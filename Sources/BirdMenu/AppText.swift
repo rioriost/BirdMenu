@@ -57,6 +57,10 @@ enum AppText {
     static var celsius: String { localized(en: "Celsius", ja: "摂氏") }
     static var fahrenheit: String { localized(en: "Fahrenheit", ja: "華氏") }
     static var debugLogging: String { localized(en: "Debug logging", ja: "デバッグログ") }
+    static var historyChartDate: String { localized(en: "History chart date", ja: "履歴グラフの日付") }
+    static var generateHistoryChart: String { localized(en: "Generate Graph", ja: "グラフを生成") }
+    static var historyChartGeneratedTitle: String { localized(en: "History Graph Generated", ja: "履歴グラフを生成しました") }
+    static var historyChartGenerationFailedTitle: String { localized(en: "Could Not Generate History Graph", ja: "履歴グラフを生成できませんでした") }
 
     static var bluetoothOff: String { localized(en: "Bluetooth is off", ja: "Bluetoothがオフです") }
     static var bluetoothUnauthorized: String { localized(en: "Bluetooth access is not allowed", ja: "Bluetoothの使用が許可されていません") }

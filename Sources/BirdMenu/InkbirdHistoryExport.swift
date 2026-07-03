@@ -8,7 +8,6 @@ struct InkbirdHistoryResult {
     let folderURL: URL
     let rawURL: URL
     let csvURL: URL?
-    let pngURLs: [URL]
     let recordCount: Int
     let packetCount: Int
     let warnings: [String]
@@ -59,6 +58,11 @@ struct InkbirdHistoryRecord {
 enum InkbirdHistoryExportWriter {
     private static let ith11BFallbackIntervalSeconds = 60
 
+    static func historyRootFolderURL() -> URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("BirdMenu Logs", isDirectory: true)
+    }
+
     static func write(
         deviceName: String,
         peripheralID: UUID,
@@ -108,23 +112,18 @@ enum InkbirdHistoryExportWriter {
             )
             : []
         let csvURL: URL?
-        let pngURLs: [URL]
         if records.contains(where: { $0.temperatureCelsius != nil || $0.humidityPercent != nil }) {
             let csv = folder.appendingPathComponent("history.csv")
             try Self.csv(for: records).write(to: csv, atomically: true, encoding: .utf8)
             csvURL = csv
-
-            pngURLs = try InkbirdHistoryChartRenderer.writePNGs(for: records, to: folder)
         } else {
             csvURL = nil
-            pngURLs = []
         }
 
         return InkbirdHistoryResult(
             folderURL: folder,
             rawURL: rawURL,
             csvURL: csvURL,
-            pngURLs: pngURLs,
             recordCount: records.count,
             packetCount: packets.count,
             warnings: warnings
@@ -145,8 +144,7 @@ enum InkbirdHistoryExportWriter {
     }
 
     private static func outputFolder(deviceName: String, peripheralID: UUID) throws -> URL {
-        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let root = documents.appendingPathComponent("BirdMenu Logs", isDirectory: true)
+        let root = historyRootFolderURL()
         let stamp = ISO8601DateFormatter.fileSafe.fileSafeString(from: Date())
         let shortID = peripheralID.uuidString.replacingOccurrences(of: "-", with: "").suffix(6).uppercased()
         let folder = root.appendingPathComponent("\(stamp)-Sensor-\(shortID)", isDirectory: true)
@@ -394,6 +392,59 @@ enum InkbirdHistoryExportWriter {
     }
 }
 
+struct InkbirdHistoryChartGenerationResult {
+    let dayStart: Date
+    let pngURL: URL
+    let recordCount: Int
+    let csvURLs: [URL]
+}
+
+enum InkbirdHistoryChartGenerationError: LocalizedError {
+    case noHistoryFolder(URL)
+    case noHistoryCSVs(URL)
+    case noRecordsForDay(Date)
+    case noChartableRecords(Date)
+    case invalidCSV(URL, line: Int)
+
+    var errorDescription: String? {
+        switch self {
+        case let .noHistoryFolder(url):
+            AppText.localized(
+                en: "History folder does not exist: \(url.path)",
+                ja: "履歴フォルダがありません: \(url.path)"
+            )
+        case let .noHistoryCSVs(url):
+            AppText.localized(
+                en: "No history.csv files were found under: \(url.path)",
+                ja: "history.csvが見つかりません: \(url.path)"
+            )
+        case let .noRecordsForDay(date):
+            AppText.localized(
+                en: "No CSV records were found for \(Self.dayString(for: date)).",
+                ja: "\(Self.dayString(for: date))のCSVレコードが見つかりません。"
+            )
+        case let .noChartableRecords(date):
+            AppText.localized(
+                en: "No chartable temperature or humidity records were found for \(Self.dayString(for: date)).",
+                ja: "\(Self.dayString(for: date))のグラフ化できる温度または湿度レコードが見つかりません。"
+            )
+        case let .invalidCSV(url, line):
+            AppText.localized(
+                en: "Invalid CSV format at \(url.path):\(line).",
+                ja: "CSV形式が不正です: \(url.path):\(line)"
+            )
+        }
+    }
+
+    private static func dayString(for date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.timeZone = .autoupdatingCurrent
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        return formatter.string(from: date)
+    }
+}
+
 enum InkbirdHistoryChartRenderer {
     private static let width = 1_500
     private static let height = 860
@@ -410,6 +461,123 @@ enum InkbirdHistoryChartRenderer {
     struct ValueRange: Equatable {
         let lower: Double
         let upper: Double
+    }
+
+    static func writePNGForLocalDay(
+        containing date: Date,
+        historyRoot: URL,
+        outputFolder: URL? = nil,
+        timeZone: TimeZone = .autoupdatingCurrent
+    ) throws -> InkbirdHistoryChartGenerationResult {
+        let fileManager = FileManager.default
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: historyRoot.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw InkbirdHistoryChartGenerationError.noHistoryFolder(historyRoot)
+        }
+
+        let csvURLs = try historyCSVURLs(in: historyRoot)
+        guard !csvURLs.isEmpty else {
+            throw InkbirdHistoryChartGenerationError.noHistoryCSVs(historyRoot)
+        }
+
+        let calendar = calendar(for: timeZone)
+        let dayStart = calendar.startOfDay(for: date)
+        var recordsByTimestamp: [Date: InkbirdHistoryRecord] = [:]
+        var contributingCSVURLs: [URL] = []
+
+        for csvURL in csvURLs {
+            let dayRecords = try records(fromCSVAt: csvURL)
+                .filter { record in
+                    guard let timestamp = record.timestamp else {
+                        return false
+                    }
+                    return calendar.startOfDay(for: timestamp) == dayStart
+                }
+            guard !dayRecords.isEmpty else {
+                continue
+            }
+            contributingCSVURLs.append(csvURL)
+            for record in dayRecords {
+                guard let timestamp = record.timestamp else {
+                    continue
+                }
+                recordsByTimestamp[timestamp] = record
+            }
+        }
+
+        let records = recordsByTimestamp.values.sorted { ($0.timestamp ?? .distantPast) < ($1.timestamp ?? .distantPast) }
+        guard !records.isEmpty else {
+            throw InkbirdHistoryChartGenerationError.noRecordsForDay(dayStart)
+        }
+        guard let pngData = try pngData(for: records, timeZone: timeZone, timeDomain: dayTimeDomain(startingAt: dayStart, timeZone: timeZone)) else {
+            throw InkbirdHistoryChartGenerationError.noChartableRecords(dayStart)
+        }
+
+        let destinationFolder = outputFolder ?? historyRoot
+        try fileManager.createDirectory(at: destinationFolder, withIntermediateDirectories: true)
+        let pngURL = destinationFolder.appendingPathComponent(fileName(forDayStartingAt: dayStart, timeZone: timeZone))
+        try pngData.write(to: pngURL, options: .atomic)
+        return InkbirdHistoryChartGenerationResult(
+            dayStart: dayStart,
+            pngURL: pngURL,
+            recordCount: records.count,
+            csvURLs: contributingCSVURLs
+        )
+    }
+
+    static func historyCSVURLs(in root: URL) throws -> [URL] {
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        var urls: [URL] = []
+        for case let url as URL in enumerator where url.lastPathComponent == "history.csv" {
+            let resourceValues = try url.resourceValues(forKeys: [.isRegularFileKey])
+            if resourceValues.isRegularFile == true {
+                urls.append(url)
+            }
+        }
+        return urls.sorted { $0.path < $1.path }
+    }
+
+    static func records(fromCSVAt url: URL) throws -> [InkbirdHistoryRecord] {
+        let csv = try String(contentsOf: url, encoding: .utf8)
+        let formatter = ISO8601DateFormatter()
+        var records: [InkbirdHistoryRecord] = []
+
+        for (zeroBasedLineNumber, rawLine) in csv.split(whereSeparator: \.isNewline).enumerated() {
+            let lineNumber = zeroBasedLineNumber + 1
+            if lineNumber == 1, rawLine == "timestamp,index,temperature_c,humidity_percent" {
+                continue
+            }
+
+            let columns = rawLine.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
+            guard columns.count >= 4 else {
+                throw InkbirdHistoryChartGenerationError.invalidCSV(url, line: lineNumber)
+            }
+
+            let timestamp = columns[0].isEmpty ? nil : formatter.date(from: columns[0])
+            if !columns[0].isEmpty, timestamp == nil {
+                throw InkbirdHistoryChartGenerationError.invalidCSV(url, line: lineNumber)
+            }
+            guard let index = Int(columns[1]) else {
+                throw InkbirdHistoryChartGenerationError.invalidCSV(url, line: lineNumber)
+            }
+
+            let temperature = try optionalDouble(columns[2], url: url, line: lineNumber)
+            let humidity = try optionalDouble(columns[3], url: url, line: lineNumber)
+            records.append(InkbirdHistoryRecord(
+                timestamp: timestamp,
+                index: index,
+                temperatureCelsius: temperature,
+                humidityPercent: humidity
+            ))
+        }
+        return records
     }
 
     static func writePNGs(
@@ -865,6 +1033,16 @@ enum InkbirdHistoryChartRenderer {
         return (0...4).map { index in
             range.lower + span * Double(index) / 4
         }
+    }
+
+    private static func optionalDouble(_ string: String, url: URL, line: Int) throws -> Double? {
+        guard !string.isEmpty else {
+            return nil
+        }
+        guard let value = Double(string) else {
+            throw InkbirdHistoryChartGenerationError.invalidCSV(url, line: line)
+        }
+        return value
     }
 
     private enum RoundingDirection {

@@ -1,9 +1,12 @@
 APP_NAME := BirdMenu
 APP_BUNDLE_ID := st.rio.birdmenu
-APP_VERSION := 1.1.3
-APP_BUILD := 7
+APP_VERSION := 1.1.4
+APP_BUILD := 8
 BUILD_DIR := .build/release
 APP_DIR := build/$(APP_NAME).app
+ENTITLEMENTS := BirdMenu.entitlements
+CODE_SIGN_IDENTITY ?= -
+CODE_SIGN_OPTIONS ?=
 CONTENTS_DIR := $(APP_DIR)/Contents
 MACOS_DIR := $(CONTENTS_DIR)/MacOS
 RESOURCES_DIR := $(CONTENTS_DIR)/Resources
@@ -46,12 +49,12 @@ app: build
 	plutil -replace CFBundleVersion -string "$(APP_BUILD)" "$(STAGING_CONTENTS_DIR)/Info.plist"
 	cp Resources/BirdMenu.icns "$(STAGING_RESOURCES_DIR)/BirdMenu.icns"
 	$(SCRUB_XATTRS)
-	codesign --force --sign - "$(STAGING_APP_DIR)"
+	codesign --force --sign "$(CODE_SIGN_IDENTITY)" $(CODE_SIGN_OPTIONS) --entitlements "$(ENTITLEMENTS)" "$(STAGING_APP_DIR)"
 	$(SCRUB_XATTRS)
 	mkdir -p build
 	ditto --noextattr --norsrc "$(STAGING_APP_DIR)" "$(APP_DIR)"
 	$(SCRUB_APP_XATTRS)
-	codesign --force --sign - "$(APP_DIR)"
+	codesign --force --sign "$(CODE_SIGN_IDENTITY)" $(CODE_SIGN_OPTIONS) --entitlements "$(ENTITLEMENTS)" "$(APP_DIR)"
 	$(SCRUB_APP_XATTRS)
 	@echo "$(APP_DIR)"
 

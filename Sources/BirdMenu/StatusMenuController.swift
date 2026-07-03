@@ -116,12 +116,9 @@ final class StatusMenuController {
                 case let .success(history):
                     if let csvURL = history.csvURL {
                         self.historyStatus = .records(history.recordCount)
-                        let pngLines = history.pngURLs.isEmpty
-                            ? ""
-                            : "\nPNG:\n\(history.pngURLs.map(\.path).joined(separator: "\n"))"
                         self.showAlert(
                             title: AppText.historyFetchCompleteTitle,
-                            message: Self.historyCompleteMessage(history: history, csvURL: csvURL, pngLines: pngLines)
+                            message: Self.historyCompleteMessage(history: history, csvURL: csvURL)
                         )
                     } else {
                         self.historyStatus = .rawOnly
@@ -364,8 +361,7 @@ final class StatusMenuController {
     }
 
     private static func historyRootFolderURL() -> URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("BirdMenu Logs", isDirectory: true)
+        InkbirdHistoryExportWriter.historyRootFolderURL()
     }
 
     private static func statusImage(color: NSColor) -> NSImage {
@@ -418,11 +414,11 @@ final class StatusMenuController {
         }
     }
 
-    private static func historyCompleteMessage(history: InkbirdHistoryResult, csvURL: URL, pngLines: String) -> String {
+    private static func historyCompleteMessage(history: InkbirdHistoryResult, csvURL: URL) -> String {
         if AppText.isJapanese {
-            return "\(history.recordCount)件の履歴レコードと\(history.packetCount)件の生パケットを保存しました。\n\nCSV: \(csvURL.path)\(pngLines)\nRaw: \(history.rawURL.path)"
+            return "\(history.recordCount)件の履歴レコードと\(history.packetCount)件の生パケットを保存しました。\n\nCSV: \(csvURL.path)\nRaw: \(history.rawURL.path)"
         }
-        return "Saved \(history.recordCount) decoded records and \(history.packetCount) raw packets.\n\nCSV: \(csvURL.path)\(pngLines)\nRaw: \(history.rawURL.path)"
+        return "Saved \(history.recordCount) decoded records and \(history.packetCount) raw packets.\n\nCSV: \(csvURL.path)\nRaw: \(history.rawURL.path)"
     }
 
     private static func historyRawDumpMessage(history: InkbirdHistoryResult) -> String {
