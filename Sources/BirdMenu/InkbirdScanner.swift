@@ -433,7 +433,7 @@ private final class HistoryFetchOperation: @unchecked Sendable {
             modeName = "ith11b-official-trace"
             shouldDecodeHistory = true
             warnings.append(
-                "Using the experimental offline-history command sequence observed from a compatible sensor app trace."
+                "Using the offline-history command sequence observed from a compatible sensor app trace."
             )
         } else {
             transferMode = .readOnlySnapshot

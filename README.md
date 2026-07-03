@@ -10,9 +10,9 @@ Compatibility testing has been performed with the INKBIRD ITH-11-B sensor. BirdM
 
 ![BirdMenu screenshot](images/birdmenu.png)
 
-## Experimental History Fetch
+## History Fetch
 
-The menu includes `Fetch Sensor History (Experimental)`. It connects to the selected compatible sensor and tries the history-read command pattern observed from related BLE hygrometers:
+The menu includes `Fetch Sensor History`. It connects to the selected compatible sensor and tries the history-read command pattern observed from related BLE hygrometers:
 
 - subscribe to notify characteristics on service `0000fff0-0000-1000-8000-00805f9b34fb`
 - write one-byte read commands to `0000fff8-0000-1000-8000-00805f9b34fb`
@@ -30,7 +30,7 @@ This feature is intentionally conservative because the offline history protocol 
 
 ## Debug Logging
 
-Enable `Debug Logging` from the menu to write received BLE data to macOS Unified Logging. The app logs decoded temperature/humidity/battery/RSSI values, raw advertisement bytes, and experimental history-fetch GATT packets.
+Enable `Debug Logging` from the menu to write received BLE data to macOS Unified Logging. The app logs decoded temperature/humidity/battery/RSSI values, raw advertisement bytes, and history-fetch GATT packets.
 
 View recent logs with:
 
@@ -103,7 +103,7 @@ See [Privacy Policy (English)](docs/PRIVACY.en.md) and [プライバシーポリ
 
 The BLE parsing logic is based on the MIT-licensed [`inkbird-ble`](https://github.com/bluetooth-devices/inkbird-ble) project.
 
-The experimental history-fetch command sequence is informed by public reverse-engineering notes for related BLE hygrometers.
+The history-fetch command sequence is informed by public reverse-engineering notes for related BLE hygrometers.
 
 ## License
 

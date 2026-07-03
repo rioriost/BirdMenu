@@ -210,7 +210,8 @@ enum InkbirdHistoryExportWriter {
     static func decodeITH11BRecords(
         packets: [InkbirdHistoryPacket],
         intervalSeconds: Int?,
-        latestReading: InkbirdReading?
+        latestReading: InkbirdReading?,
+        calendar: Calendar = .current
     ) -> [InkbirdHistoryRecord] {
         let records = decodeITH11BPacketRecords(packets)
 
@@ -218,7 +219,11 @@ enum InkbirdHistoryExportWriter {
             return []
         }
 
-        let anchor = latestReading?.date ?? Date()
+        let anchor = ith11BHistoryAnchorDate(
+            packets: packets,
+            recordCount: records.count,
+            calendar: calendar
+        ) ?? latestReading?.date ?? Date()
         let effectiveInterval = intervalSeconds ?? ith11BFallbackIntervalSeconds
         return records.enumerated().map { index, pair in
             return InkbirdHistoryRecord(
@@ -228,6 +233,53 @@ enum InkbirdHistoryExportWriter {
                 humidityPercent: pair.humidityPercent
             )
         }
+    }
+
+    private static func ith11BHistoryAnchorDate(
+        packets: [InkbirdHistoryPacket],
+        recordCount: Int,
+        calendar: Calendar
+    ) -> Date? {
+        for packet in packets.reversed() where packet.command == "ith11b_history_command_02" {
+            guard let data = Data(hexString: packet.hex), data.count >= 11 else {
+                continue
+            }
+
+            let announcedCount = Int(data[0])
+                | (Int(data[1]) << 8)
+                | (Int(data[2]) << 16)
+                | (Int(data[3]) << 24)
+            guard announcedCount == recordCount else {
+                continue
+            }
+
+            let minute = Int(data[4])
+            let hour = Int(data[5])
+            let day = Int(data[7])
+            let month = Int(data[8])
+            let year = Int(data[9]) | (Int(data[10]) << 8)
+
+            guard (0...59).contains(minute),
+                  (0...23).contains(hour),
+                  (1...31).contains(day),
+                  (1...12).contains(month),
+                  (2000...2099).contains(year)
+            else {
+                continue
+            }
+
+            return calendar.date(from: DateComponents(
+                timeZone: calendar.timeZone,
+                year: year,
+                month: month,
+                day: day,
+                hour: hour,
+                minute: minute,
+                second: 0
+            ))
+        }
+
+        return nil
     }
 
     private static func decodeITH11BPacketRecords(_ packets: [InkbirdHistoryPacket]) -> [(temperatureCelsius: Double, humidityPercent: Double)] {

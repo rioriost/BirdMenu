@@ -26,7 +26,7 @@ enum AppText {
     static var rawOnly: String { localized(en: "raw only", ja: "生データのみ") }
     static var failed: String { localized(en: "failed", ja: "失敗") }
     static var rescan: String { localized(en: "Rescan", ja: "再スキャン") }
-    static var fetchSensorHistory: String { localized(en: "Fetch Sensor History (Experimental)", ja: "センサー履歴を取得（実験的）") }
+    static var fetchSensorHistory: String { localized(en: "Fetch Sensor History", ja: "センサー履歴を取得") }
     static var openHistoryFolder: String { localized(en: "Open History Folder", ja: "履歴フォルダを開く") }
     static var about: String { localized(en: "About BirdMenu...", ja: "BirdMenuについて...") }
     static var settings: String { localized(en: "Settings...", ja: "設定...") }

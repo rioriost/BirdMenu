@@ -26,7 +26,7 @@ This data is used only to display readings in the macOS menu bar and, when reque
 
 ## Local Storage
 
-When you use the experimental history fetch feature, BirdMenu writes files under:
+When you use the history fetch feature, BirdMenu writes files under:
 
 ```text
 ~/Documents/BirdMenu Logs/

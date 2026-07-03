@@ -59,6 +59,95 @@ import Testing
     #expect(records.last?.timestamp == Date(timeIntervalSince1970: 10_000))
 }
 
+@Test func decodesITH11BHistoryPayloadAnchoredByCommand02Metadata() throws {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(identifier: "Asia/Tokyo")!
+    let anchor = try #require(calendar.date(from: DateComponents(
+        timeZone: calendar.timeZone,
+        year: 2026,
+        month: 7,
+        day: 3,
+        hour: 14,
+        minute: 34,
+        second: 0
+    )))
+    let packets = [
+        InkbirdHistoryPacket(
+            command: "ith11b_history_command_02",
+            characteristicUUID: "FFF6",
+            timestamp: Date(timeIntervalSince1970: 999),
+            hex: "07000000220e050307ea079bdb00000000000000"
+        ),
+        InkbirdHistoryPacket(
+            command: "ith11b_history_command_01",
+            characteristicUUID: "FFF6",
+            timestamp: Date(timeIntervalSince1970: 1_000),
+            hex: "fd006f02fd006f02fd006d02fd006f02fd007502fd007902fd007d0200000000"
+        )
+    ]
+    let latest = InkbirdReading(
+        model: "ITH-11-B",
+        deviceName: "ITH-11-B",
+        peripheralID: UUID(),
+        temperatureCelsius: 25.3,
+        humidityPercent: 63.7,
+        batteryPercent: 100,
+        rssi: -50,
+        date: Date(timeIntervalSince1970: 10_000),
+        advertisementHex: ""
+    )
+
+    let records = InkbirdHistoryExportWriter.decodeITH11BRecords(
+        packets: packets,
+        intervalSeconds: 60,
+        latestReading: latest,
+        calendar: calendar
+    )
+
+    #expect(records.count == 7)
+    #expect(records.first?.timestamp == anchor.addingTimeInterval(-360))
+    #expect(records.last?.timestamp == anchor)
+}
+
+@Test func ignoresITH11BCommand02MetadataWhenRecordCountDoesNotMatch() throws {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(identifier: "Asia/Tokyo")!
+    let packet = InkbirdHistoryPacket(
+        command: "ith11b_history_command_01",
+        characteristicUUID: "FFF6",
+        timestamp: Date(timeIntervalSince1970: 1_000),
+        hex: "fd006f02fd006f02fd006d02fd006f02fd007502fd007902fd007d0200000000"
+    )
+    let mismatchedMetadata = InkbirdHistoryPacket(
+        command: "ith11b_history_command_02",
+        characteristicUUID: "FFF6",
+        timestamp: Date(timeIntervalSince1970: 999),
+        hex: "08000000220e050307ea079bdb00000000000000"
+    )
+    let latest = InkbirdReading(
+        model: "ITH-11-B",
+        deviceName: "ITH-11-B",
+        peripheralID: UUID(),
+        temperatureCelsius: 25.3,
+        humidityPercent: 63.7,
+        batteryPercent: 100,
+        rssi: -50,
+        date: Date(timeIntervalSince1970: 10_000),
+        advertisementHex: ""
+    )
+
+    let records = InkbirdHistoryExportWriter.decodeITH11BRecords(
+        packets: [mismatchedMetadata, packet],
+        intervalSeconds: 60,
+        latestReading: latest,
+        calendar: calendar
+    )
+
+    #expect(records.count == 7)
+    #expect(records.first?.timestamp == Date(timeIntervalSince1970: 9_640))
+    #expect(records.last?.timestamp == Date(timeIntervalSince1970: 10_000))
+}
+
 @Test func decodesITH11BHistoryPayloadAcrossNotificationBoundaries() {
     let packets = [
         InkbirdHistoryPacket(
