@@ -2,6 +2,43 @@ import Foundation
 import Testing
 @testable import BirdMenu
 
+private func historyMetadataPacket(
+    count: Int,
+    minute: Int = 34,
+    hour: Int = 14,
+    weekday: Int = 5,
+    day: Int = 3,
+    month: Int = 7,
+    year: Int = 2026
+) -> InkbirdHistoryPacket {
+    let bytes = [
+        count & 0xff,
+        (count >> 8) & 0xff,
+        (count >> 16) & 0xff,
+        (count >> 24) & 0xff,
+        minute,
+        hour,
+        weekday,
+        day,
+        month,
+        year & 0xff,
+        (year >> 8) & 0xff
+    ]
+    let hex = bytes.map { String(format: "%02x", $0) }.joined()
+    return InkbirdHistoryPacket(
+        command: "ith11b_history_command_02",
+        characteristicUUID: "FFF6",
+        timestamp: Date(timeIntervalSince1970: 999),
+        hex: hex
+    )
+}
+
+private func tokyoCalendar() -> Calendar {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(identifier: "Asia/Tokyo")!
+    return calendar
+}
+
 @Test func buildsTimestampCommandLikeOfficialTrace() throws {
     var calendar = Calendar(identifier: .gregorian)
     calendar.timeZone = TimeZone(identifier: "Asia/Tokyo")!
@@ -27,6 +64,16 @@ import Testing
 }
 
 @Test func decodesITH11BHistoryPayload() throws {
+    let calendar = tokyoCalendar()
+    let anchor = try #require(calendar.date(from: DateComponents(
+        timeZone: calendar.timeZone,
+        year: 2026,
+        month: 7,
+        day: 3,
+        hour: 14,
+        minute: 34,
+        second: 0
+    )))
     let packet = InkbirdHistoryPacket(
         command: "ith11b_history_command_01",
         characteristicUUID: "FFF6",
@@ -46,17 +93,18 @@ import Testing
     )
 
     let records = InkbirdHistoryExportWriter.decodeITH11BRecords(
-        packets: [packet],
+        packets: [historyMetadataPacket(count: 7), packet],
         intervalSeconds: 60,
-        latestReading: latest
+        latestReading: latest,
+        calendar: calendar
     )
 
     #expect(records.count == 7)
     #expect(records.first?.temperatureCelsius == 25.3)
     #expect(records.first?.humidityPercent == 62.3)
     #expect(records.last?.humidityPercent == 63.7)
-    #expect(records.first?.timestamp == Date(timeIntervalSince1970: 9_640))
-    #expect(records.last?.timestamp == Date(timeIntervalSince1970: 10_000))
+    #expect(records.first?.timestamp == anchor.addingTimeInterval(-360))
+    #expect(records.last?.timestamp == anchor)
 }
 
 @Test func decodesITH11BHistoryPayloadAnchoredByCommand02Metadata() throws {
@@ -72,12 +120,7 @@ import Testing
         second: 0
     )))
     let packets = [
-        InkbirdHistoryPacket(
-            command: "ith11b_history_command_02",
-            characteristicUUID: "FFF6",
-            timestamp: Date(timeIntervalSince1970: 999),
-            hex: "07000000220e050307ea079bdb00000000000000"
-        ),
+        historyMetadataPacket(count: 7),
         InkbirdHistoryPacket(
             command: "ith11b_history_command_01",
             characteristicUUID: "FFF6",
@@ -109,7 +152,7 @@ import Testing
     #expect(records.last?.timestamp == anchor)
 }
 
-@Test func ignoresITH11BCommand02MetadataWhenRecordCountDoesNotMatch() throws {
+@Test func rejectsITH11BCommand02MetadataWhenRecordCountDoesNotMatch() throws {
     var calendar = Calendar(identifier: .gregorian)
     calendar.timeZone = TimeZone(identifier: "Asia/Tokyo")!
     let packet = InkbirdHistoryPacket(
@@ -143,9 +186,7 @@ import Testing
         calendar: calendar
     )
 
-    #expect(records.count == 7)
-    #expect(records.first?.timestamp == Date(timeIntervalSince1970: 9_640))
-    #expect(records.last?.timestamp == Date(timeIntervalSince1970: 10_000))
+    #expect(records.isEmpty)
 }
 
 @Test func decodesITH11BHistoryPayloadAcrossNotificationBoundaries() {
@@ -165,9 +206,10 @@ import Testing
     ]
 
     let records = InkbirdHistoryExportWriter.decodeITH11BRecords(
-        packets: packets,
+        packets: [historyMetadataPacket(count: 2)] + packets,
         intervalSeconds: nil,
-        latestReading: nil
+        latestReading: nil,
+        calendar: tokyoCalendar()
     )
 
     #expect(records.count == 2)
@@ -194,9 +236,10 @@ import Testing
     ]
 
     let records = InkbirdHistoryExportWriter.decodeITH11BRecords(
-        packets: packets,
+        packets: [historyMetadataPacket(count: 90)] + packets,
         intervalSeconds: nil,
-        latestReading: nil
+        latestReading: nil,
+        calendar: tokyoCalendar()
     )
 
     #expect(records.count == 90)
@@ -372,7 +415,7 @@ import Testing
     #expect(data.starts(with: Data([0x89, 0x50, 0x4e, 0x47])))
 }
 
-@Test func decodesITH11BInitialRTDTHHistoryWithFallbackIntervalAndDeduplication() {
+@Test func doesNotDecodeITH11BInitialRTDTHHistoryWithoutCommandFlow() {
     let rtdthHex = "7274647468de00e703610084080000000000e703"
         + String(repeating: "e500e703", count: 14)
         + String(repeating: "0000", count: 50)
@@ -409,11 +452,7 @@ import Testing
         latestReading: latest
     )
 
-    #expect(records.count == 14)
-    #expect(records.first?.temperatureCelsius == 22.9)
-    #expect(records.first?.humidityPercent == 99.9)
-    #expect(records.first?.timestamp == Date(timeIntervalSince1970: 9_220))
-    #expect(records.last?.timestamp == Date(timeIntervalSince1970: 10_000))
+    #expect(records.isEmpty)
 }
 
 @Test func chartHumidityAxisFixesUpperBoundAtOneHundredPercent() {

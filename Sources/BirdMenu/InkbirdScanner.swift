@@ -238,6 +238,8 @@ enum HistoryFetchError: LocalizedError {
     case serviceNotFound
     case historyCharacteristicNotFound
     case disconnected
+    case historyFlowIncomplete(String)
+    case historyDecodeFailed
     case timedOut(String)
 
     var errorDescription: String? {
@@ -253,9 +255,13 @@ enum HistoryFetchError: LocalizedError {
         case .serviceNotFound:
             "The expected Bluetooth service was not found."
         case .historyCharacteristicNotFound:
-            "The history characteristic fff8 was not found."
+            "A supported history command characteristic was not found."
         case .disconnected:
             "The device disconnected during history fetch."
+        case let .historyFlowIncomplete(detail):
+            "History fetch did not complete the expected command flow: \(detail)."
+        case .historyDecodeFailed:
+            "History data was received, but it could not be decoded as a complete response."
         case let .timedOut(command):
             "Timed out while fetching \(command)."
         }
@@ -364,11 +370,6 @@ private final class HistoryFetchOperation: @unchecked Sendable {
         guard peripheral.identifier == self.peripheral.identifier, !completed else {
             return
         }
-        if !packets.isEmpty {
-            warnings.append("The device disconnected during history fetch. Saved the partial raw dump captured before disconnect.")
-            finish()
-            return
-        }
         fail(error ?? HistoryFetchError.disconnected)
     }
 
@@ -393,10 +394,7 @@ private final class HistoryFetchOperation: @unchecked Sendable {
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
         if let error {
             pendingCharacteristicServiceUUIDs.remove(service.uuid.uuidString)
-            warnings.append("Characteristic discovery failed for \(service.uuid.uuidString): \(error.localizedDescription)")
-            if pendingCharacteristicServiceUUIDs.isEmpty {
-                configureHistoryTransferIfReady(peripheral: peripheral)
-            }
+            fail(error)
             return
         }
 
@@ -439,9 +437,6 @@ private final class HistoryFetchOperation: @unchecked Sendable {
             transferMode = .readOnlySnapshot
             modeName = "read-only-gatt-snapshot"
             shouldDecodeHistory = false
-            warnings.append(
-                "FFF8 was not found on this sensor. Saved a full GATT snapshot without writing unknown history commands."
-            )
             BirdMenuLog.debugData("history.operation noHistoryCommandMode mode=readOnlyGattSnapshot")
         }
         notifyCharacteristics = allDiscoveredCharacteristics.filter {
@@ -461,14 +456,16 @@ private final class HistoryFetchOperation: @unchecked Sendable {
         }
         pendingNotificationKeys = Set(notifyCharacteristics.map(characteristicKey))
         if notifyCharacteristics.isEmpty {
-            warnings.append("No notifying characteristic was found; fff8 reads may still produce data, but history notifications are unlikely.")
+            fail(HistoryFetchError.historyFlowIncomplete("no notifying characteristic was found"))
+            return
         }
         startCommandsIfReady()
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
         if let error {
-            warnings.append("Could not enable notifications for \(characteristic.uuid.uuidString): \(error.localizedDescription)")
+            fail(error)
+            return
         }
         pendingNotificationKeys.remove(characteristicKey(characteristic))
         startCommandsIfReady()
@@ -478,10 +475,7 @@ private final class HistoryFetchOperation: @unchecked Sendable {
         let readKey = characteristicKey(characteristic)
         let wasPendingInitialRead = pendingInitialReadKeys.remove(readKey) != nil
         if let error {
-            warnings.append("Read/update failed for \(characteristic.uuid.uuidString): \(error.localizedDescription)")
-            if wasPendingInitialRead {
-                startCommandsIfReady()
-            }
+            fail(error)
             return
         }
         guard let value = characteristic.value else {
@@ -526,8 +520,7 @@ private final class HistoryFetchOperation: @unchecked Sendable {
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
         if let error {
-            warnings.append("Write failed for \(characteristic.uuid.uuidString): \(error.localizedDescription)")
-            finishCurrentCommand()
+            fail(error)
             return
         }
 
@@ -555,8 +548,7 @@ private final class HistoryFetchOperation: @unchecked Sendable {
         hasStartedCommands = true
         switch transferMode {
         case .readOnlySnapshot:
-            warnings.append("No writable characteristic was available for a history probe. Saved discovered GATT metadata only.")
-            finish()
+            fail(HistoryFetchError.historyCharacteristicNotFound)
             return
         case let .legacyFFF8(characteristic):
             commandAttempts = historyCommands.map { CommandAttempt(command: $0, characteristic: characteristic) }
@@ -596,9 +588,8 @@ private final class HistoryFetchOperation: @unchecked Sendable {
             }
         }
         maxTimer = Timer.scheduledTimer(withTimeInterval: command.maxTimeout, repeats: false) { [weak self] _ in
-            self?.warnings.append("Timed out while waiting for \(command.name); continuing with the next command.")
             BirdMenuLog.debugData("history.command maxTimeout name=\(command.name)")
-            self?.finishCurrentCommand()
+            self?.fail(HistoryFetchError.timedOut(command.name))
         }
     }
 
@@ -633,6 +624,7 @@ private final class HistoryFetchOperation: @unchecked Sendable {
         operationTimer?.invalidate()
         operationTimer = nil
         do {
+            try validateSuccessfulHistoryFlow()
             let result = try InkbirdHistoryExportWriter.write(
                 deviceName: latestReading.deviceName,
                 peripheralID: latestReading.peripheralID,
@@ -648,6 +640,41 @@ private final class HistoryFetchOperation: @unchecked Sendable {
             completion(.success(result))
         } catch {
             completion(.failure(error))
+        }
+    }
+
+    private func validateSuccessfulHistoryFlow() throws {
+        switch transferMode {
+        case .readOnlySnapshot:
+            throw HistoryFetchError.historyCharacteristicNotFound
+        case .legacyFFF8:
+            let requiredCommands = ["temp_content", "hum_content"]
+            let missing = requiredCommands.filter { command in
+                !packets.contains { $0.command == command }
+            }
+            if !missing.isEmpty {
+                throw HistoryFetchError.historyFlowIncomplete("missing \(missing.joined(separator: ", "))")
+            }
+        case .ith11BTrace:
+            let requiredCommands = [
+                "ith11b_history_command_02",
+                "ith11b_history_command_01",
+                "ith11b_history_command_04"
+            ]
+            let missing = requiredCommands.filter { command in
+                !packets.contains { $0.command == command }
+            }
+            if !missing.isEmpty {
+                throw HistoryFetchError.historyFlowIncomplete("missing \(missing.joined(separator: ", "))")
+            }
+            let records = InkbirdHistoryExportWriter.decodeITH11BRecords(
+                packets: packets,
+                intervalSeconds: InkbirdHistoryExportWriter.intervalSeconds(from: configData),
+                latestReading: latestReading
+            )
+            guard !records.isEmpty else {
+                throw HistoryFetchError.historyDecodeFailed
+            }
         }
     }
 

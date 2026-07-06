@@ -219,11 +219,13 @@ enum InkbirdHistoryExportWriter {
             return []
         }
 
-        let anchor = ith11BHistoryAnchorDate(
+        guard let anchor = ith11BHistoryAnchorDate(
             packets: packets,
             recordCount: records.count,
             calendar: calendar
-        ) ?? latestReading?.date ?? Date()
+        ) else {
+            return []
+        }
         let effectiveInterval = intervalSeconds ?? ith11BFallbackIntervalSeconds
         return records.enumerated().map { index, pair in
             return InkbirdHistoryRecord(
@@ -289,23 +291,7 @@ enum InkbirdHistoryExportWriter {
             .map(ith11BRecordPayload)
             .reduce(Data(), +)
         let commandRecords = decodeITH11BPayload(commandData)
-        if !commandRecords.isEmpty {
-            return commandRecords
-        }
-
-        var seenPayloads: Set<Data> = []
-        var records: [(temperatureCelsius: Double, humidityPercent: Double)] = []
-        for payload in packets
-            .filter({ $0.characteristicUUID.caseInsensitiveCompare("FFF6") == .orderedSame })
-            .compactMap({ Data(hexString: $0.hex) })
-            .compactMap(ith11BRTDTHRecordPayload)
-        {
-            guard seenPayloads.insert(payload).inserted else {
-                continue
-            }
-            records.append(contentsOf: decodeITH11BPayload(payload))
-        }
-        return records
+        return commandRecords
     }
 
     private static func decodeITH11BPayload(_ data: Data) -> [(temperatureCelsius: Double, humidityPercent: Double)] {
@@ -344,32 +330,6 @@ enum InkbirdHistoryExportWriter {
             return data
         }
         return Data(data.dropLast(2))
-    }
-
-    private static func ith11BRTDTHRecordPayload(_ data: Data) -> Data? {
-        let magic = Data([0x72, 0x74, 0x64, 0x74, 0x68])
-        let recordOffset = 20
-        guard data.starts(with: magic), data.count >= recordOffset + 4 else {
-            return nil
-        }
-
-        var payload = Data()
-        var index = recordOffset
-        while index + 3 < data.count {
-            let temperatureRaw = Int16(bitPattern: UInt16(data[index]) | (UInt16(data[index + 1]) << 8))
-            let humidityRaw = UInt16(data[index + 2]) | (UInt16(data[index + 3]) << 8)
-            if temperatureRaw == 0, humidityRaw == 0 {
-                break
-            }
-            let temperature = Double(temperatureRaw) / 10.0
-            let humidity = Double(humidityRaw) / 10.0
-            guard (-60.0...100.0).contains(temperature), (0.0...100.0).contains(humidity) else {
-                return nil
-            }
-            payload.append(contentsOf: data[index..<(index + 4)])
-            index += 4
-        }
-        return payload.isEmpty ? nil : payload
     }
 
     private static func decodeSignedSeries(
