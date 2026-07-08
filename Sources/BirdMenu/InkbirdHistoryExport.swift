@@ -237,6 +237,23 @@ enum InkbirdHistoryExportWriter {
         }
     }
 
+    static func ith11BExpectedRecordCount(from packets: [InkbirdHistoryPacket]) -> Int? {
+        for packet in packets.reversed() where packet.command == "ith11b_history_command_02" {
+            guard let data = Data(hexString: packet.hex), data.count >= 4 else {
+                continue
+            }
+            return Int(data[0])
+                | (Int(data[1]) << 8)
+                | (Int(data[2]) << 16)
+                | (Int(data[3]) << 24)
+        }
+        return nil
+    }
+
+    static func decodedITH11BRecordCount(from packets: [InkbirdHistoryPacket]) -> Int {
+        decodeITH11BPacketRecords(packets).count
+    }
+
     private static func ith11BHistoryAnchorDate(
         packets: [InkbirdHistoryPacket],
         recordCount: Int,
@@ -247,11 +264,7 @@ enum InkbirdHistoryExportWriter {
                 continue
             }
 
-            let announcedCount = Int(data[0])
-                | (Int(data[1]) << 8)
-                | (Int(data[2]) << 16)
-                | (Int(data[3]) << 24)
-            guard announcedCount == recordCount else {
+            guard ith11BExpectedRecordCount(from: [packet]) == recordCount else {
                 continue
             }
 

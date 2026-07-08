@@ -249,6 +249,27 @@ private func tokyoCalendar() -> Calendar {
     #expect(records[45].humidityPercent == 99.5)
 }
 
+@Test func countsDecodedITH11BRecordsAgainstExpectedMetadata() {
+    let packets = [
+        historyMetadataPacket(count: 90),
+        InkbirdHistoryPacket(
+            command: "ith11b_history_command_01",
+            characteristicUUID: "FFF6",
+            timestamp: Date(timeIntervalSince1970: 1_000),
+            hex: String(repeating: "e400b103", count: 45) + "0100"
+        ),
+        InkbirdHistoryPacket(
+            command: "ith11b_history_command_01",
+            characteristicUUID: "FFF6",
+            timestamp: Date(timeIntervalSince1970: 1_001),
+            hex: String(repeating: "e500e303", count: 45) + "0200"
+        )
+    ]
+
+    #expect(InkbirdHistoryExportWriter.ith11BExpectedRecordCount(from: packets) == 90)
+    #expect(InkbirdHistoryExportWriter.decodedITH11BRecordCount(from: packets) == 90)
+}
+
 @Test func chartGroupsRecordsByLocalDayInProvidedTimeZone() throws {
     var calendar = Calendar(identifier: .gregorian)
     calendar.timeZone = TimeZone(identifier: "Asia/Tokyo")!

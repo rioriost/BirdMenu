@@ -295,6 +295,7 @@ private final class HistoryFetchOperation: @unchecked Sendable {
     private static let notifyCharacteristicUUID = CBUUID(string: "0000FFF6-0000-1000-8000-00805F9B34FB")
     private static let ith11BClockCharacteristicUUID = CBUUID(string: "0000FFF7-0000-1000-8000-00805F9B34FB")
     private static let historyCharacteristicUUID = CBUUID(string: "0000FFF8-0000-1000-8000-00805F9B34FB")
+    private static let operationTimeout: TimeInterval = 2_400
 
     private let centralManager: CBCentralManager
     private let peripheral: CBPeripheral
@@ -303,10 +304,10 @@ private final class HistoryFetchOperation: @unchecked Sendable {
     private let completion: (Result<InkbirdHistoryResult, Error>) -> Void
     private let historyCommands: [Command] = [
         Command(name: "temp_header", value: Data([0x02]), quietTimeout: 0.8, maxTimeout: 5, readAfterWrite: true),
-        Command(name: "temp_content", value: Data([0x01]), quietTimeout: 5, maxTimeout: 180, readAfterWrite: true),
+        Command(name: "temp_content", value: Data([0x01]), quietTimeout: 10, maxTimeout: 600, readAfterWrite: true),
         Command(name: "temp_content_crc", value: Data([0x07]), quietTimeout: 0.8, maxTimeout: 5, readAfterWrite: true),
         Command(name: "hum_header", value: Data([0x04]), quietTimeout: 0.8, maxTimeout: 5, readAfterWrite: true),
-        Command(name: "hum_content", value: Data([0x03]), quietTimeout: 5, maxTimeout: 180, readAfterWrite: true),
+        Command(name: "hum_content", value: Data([0x03]), quietTimeout: 10, maxTimeout: 600, readAfterWrite: true),
         Command(name: "hum_content_crc", value: Data([0x08]), quietTimeout: 0.8, maxTimeout: 5, readAfterWrite: true)
     ]
 
@@ -352,7 +353,7 @@ private final class HistoryFetchOperation: @unchecked Sendable {
         BirdMenuLog.debugData("history.operation connect id=\(peripheral.identifier.uuidString) name=\(peripheral.name ?? "-")")
         peripheral.delegate = nil
         centralManager.connect(peripheral)
-        operationTimer = Timer.scheduledTimer(withTimeInterval: 900, repeats: false) { [weak self] _ in
+        operationTimer = Timer.scheduledTimer(withTimeInterval: Self.operationTimeout, repeats: false) { [weak self] _ in
             self?.fail(HistoryFetchError.timedOut("history operation"))
         }
     }
@@ -512,6 +513,8 @@ private final class HistoryFetchOperation: @unchecked Sendable {
         BirdMenuLog.debugData("history.packet command=\(commandName) char=\(characteristic.uuid.uuidString) bytes=\(value.count) hex=\(value.hexString)")
         if wasPendingInitialRead {
             startCommandsIfReady()
+        } else if shouldFinishITH11BHistoryContentCommand() {
+            finishCurrentCommand()
         } else {
             currentAttemptReceivedPacket = true
             scheduleQuietTimer()
@@ -537,6 +540,7 @@ private final class HistoryFetchOperation: @unchecked Sendable {
         invalidateTimers()
         operationTimer?.invalidate()
         operationTimer = nil
+        saveFailureDumpIfUseful(error: error)
         BirdMenuLog.debugData("history.operation fail error=\(error.localizedDescription)")
         completion(.failure(error))
     }
@@ -613,6 +617,43 @@ private final class HistoryFetchOperation: @unchecked Sendable {
         invalidateTimers()
         currentAttempt = nil
         writeNextCommand()
+    }
+
+    private func shouldFinishITH11BHistoryContentCommand() -> Bool {
+        guard currentAttempt?.command.name == "ith11b_history_command_01" else {
+            return false
+        }
+        guard let expectedCount = InkbirdHistoryExportWriter.ith11BExpectedRecordCount(from: packets), expectedCount > 0 else {
+            return false
+        }
+        let decodedCount = InkbirdHistoryExportWriter.decodedITH11BRecordCount(from: packets)
+        guard decodedCount >= expectedCount else {
+            return false
+        }
+        BirdMenuLog.debugData("history.command expectedRecordCountReached expected=\(expectedCount) decoded=\(decodedCount)")
+        return true
+    }
+
+    private func saveFailureDumpIfUseful(error: Error) {
+        guard hasStartedCommands || !packets.isEmpty || !characteristics.isEmpty else {
+            return
+        }
+        do {
+            let result = try InkbirdHistoryExportWriter.write(
+                deviceName: latestReading.deviceName,
+                peripheralID: latestReading.peripheralID,
+                latestReading: latestReading,
+                config: configData,
+                characteristics: characteristics,
+                packets: packets,
+                warnings: warnings + ["Fetch failed: \(error.localizedDescription)"],
+                mode: modeName,
+                decodeHistory: false
+            )
+            BirdMenuLog.debugData("history.operation wroteFailureDump raw=\(result.rawURL.path) packets=\(result.packetCount)")
+        } catch {
+            BirdMenuLog.error("history.operation failureDumpFailed error=\(error.localizedDescription)")
+        }
     }
 
     private func finish() {
@@ -732,8 +773,8 @@ private final class HistoryFetchOperation: @unchecked Sendable {
                 command: Command(
                     name: "ith11b_history_command_01",
                     value: Data([0x01]),
-                    quietTimeout: 8,
-                    maxTimeout: 600,
+                    quietTimeout: 30,
+                    maxTimeout: 1_800,
                     readAfterWrite: false
                 ),
                 characteristic: configCharacteristic
