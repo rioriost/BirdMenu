@@ -241,6 +241,7 @@ enum HistoryFetchError: LocalizedError {
     case historyFlowIncomplete(String)
     case historyDecodeFailed
     case timedOut(String)
+    case partialDumpSaved(reason: String, rawPath: String, csvPath: String?)
 
     var errorDescription: String? {
         switch self {
@@ -264,6 +265,18 @@ enum HistoryFetchError: LocalizedError {
             "History data was received, but it could not be decoded as a complete response."
         case let .timedOut(command):
             "Timed out while fetching \(command)."
+        case let .partialDumpSaved(reason, rawPath, csvPath):
+            if let csvPath {
+                AppText.localized(
+                    en: "\(reason)\n\nPartial history data was saved before the failure.\nCSV: \(csvPath)\nRaw: \(rawPath)",
+                    ja: "\(reason)\n\n失敗前に取得できた履歴データを保存しました。\nCSV: \(csvPath)\nRaw: \(rawPath)"
+                )
+            } else {
+                AppText.localized(
+                    en: "\(reason)\n\nPartial raw data was saved before the failure.\nRaw: \(rawPath)",
+                    ja: "\(reason)\n\n失敗前に取得できた生データを保存しました。\nRaw: \(rawPath)"
+                )
+            }
         }
     }
 }
@@ -540,9 +553,9 @@ private final class HistoryFetchOperation: @unchecked Sendable {
         invalidateTimers()
         operationTimer?.invalidate()
         operationTimer = nil
-        saveFailureDumpIfUseful(error: error)
-        BirdMenuLog.debugData("history.operation fail error=\(error.localizedDescription)")
-        completion(.failure(error))
+        let reportedError = errorWithFailureDumpIfUseful(error)
+        BirdMenuLog.debugData("history.operation fail error=\(reportedError.localizedDescription)")
+        completion(.failure(reportedError))
     }
 
     private func startCommandsIfReady() {
@@ -634,9 +647,20 @@ private final class HistoryFetchOperation: @unchecked Sendable {
         return true
     }
 
-    private func saveFailureDumpIfUseful(error: Error) {
+    private func errorWithFailureDumpIfUseful(_ error: Error) -> Error {
+        guard let result = saveFailureDumpIfUseful(error: error) else {
+            return error
+        }
+        return HistoryFetchError.partialDumpSaved(
+            reason: error.localizedDescription,
+            rawPath: result.rawURL.path,
+            csvPath: result.csvURL?.path
+        )
+    }
+
+    private func saveFailureDumpIfUseful(error: Error) -> InkbirdHistoryResult? {
         guard hasStartedCommands || !packets.isEmpty || !characteristics.isEmpty else {
-            return
+            return nil
         }
         do {
             let result = try InkbirdHistoryExportWriter.write(
@@ -648,11 +672,13 @@ private final class HistoryFetchOperation: @unchecked Sendable {
                 packets: packets,
                 warnings: warnings + ["Fetch failed: \(error.localizedDescription)"],
                 mode: modeName,
-                decodeHistory: false
+                decodeHistory: shouldDecodeHistory
             )
-            BirdMenuLog.debugData("history.operation wroteFailureDump raw=\(result.rawURL.path) packets=\(result.packetCount)")
+            BirdMenuLog.debugData("history.operation wroteFailureDump raw=\(result.rawURL.path) csv=\(result.csvURL?.path ?? "-") packets=\(result.packetCount) records=\(result.recordCount)")
+            return result
         } catch {
             BirdMenuLog.error("history.operation failureDumpFailed error=\(error.localizedDescription)")
+            return nil
         }
     }
 
@@ -680,7 +706,8 @@ private final class HistoryFetchOperation: @unchecked Sendable {
             BirdMenuLog.debugData("history.operation wrote raw=\(result.rawURL.path) csv=\(result.csvURL?.path ?? "-") packets=\(result.packetCount) records=\(result.recordCount)")
             completion(.success(result))
         } catch {
-            completion(.failure(error))
+            let reportedError = errorWithFailureDumpIfUseful(error)
+            completion(.failure(reportedError))
         }
     }
 
