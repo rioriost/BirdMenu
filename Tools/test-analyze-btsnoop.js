@@ -75,8 +75,10 @@ try {
   ], { encoding: "utf8" });
   const parsed = JSON.parse(json);
   assert.equal(parsed.format, "apple-packetlogger");
+  assert.equal(parsed.timestampBasis, "device-local-wall-clock");
   assert.equal(parsed.metadata.includes("Product: iPhone17,1"), true);
   assert.equal(parsed.advertisingReports.some((report) => report.name === "ITH-11-B"), true);
+  assert.equal(parsed.advertisingReports[0].timestamp, "1970-01-01T00:00:01.000Z");
 } finally {
   fs.rmSync(appleSamplePath, { force: true });
 }
@@ -123,7 +125,8 @@ function appleRecord(type, payload) {
   const recordLength = 8 + 1 + payload.length;
   const record = Buffer.alloc(4 + recordLength);
   record.writeUInt32LE(recordLength, 0);
-  record.writeBigUInt64LE(1_000_000n, 4);
+  record.writeUInt32LE(1, 4);
+  record.writeUInt32LE(0, 8);
   record[12] = type;
   payload.copy(record, 13);
   return record;

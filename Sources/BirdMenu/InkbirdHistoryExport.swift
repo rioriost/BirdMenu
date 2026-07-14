@@ -35,6 +35,7 @@ struct InkbirdHistoryRawDump: Codable {
     let latestReading: LatestReadingSnapshot?
     let configHex: String?
     let intervalSeconds: Int?
+    let clockSetAt: Date?
     let characteristics: [InkbirdGATTCharacteristicInfo]
     let packets: [InkbirdHistoryPacket]
     let warnings: [String]
@@ -56,8 +57,6 @@ struct InkbirdHistoryRecord {
 }
 
 enum InkbirdHistoryExportWriter {
-    private static let ith11BFallbackIntervalSeconds = 60
-
     static func historyRootFolderURL() -> URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("BirdMenu Logs", isDirectory: true)
@@ -72,7 +71,8 @@ enum InkbirdHistoryExportWriter {
         packets: [InkbirdHistoryPacket],
         warnings: [String],
         mode: String = "fff8-history",
-        decodeHistory: Bool = true
+        decodeHistory: Bool = true,
+        clockSetAt: Date? = nil
     ) throws -> InkbirdHistoryResult {
         let folder = try outputFolder(deviceName: deviceName, peripheralID: peripheralID)
         let interval = intervalSeconds(from: config)
@@ -92,6 +92,7 @@ enum InkbirdHistoryExportWriter {
             },
             configHex: config?.hexString,
             intervalSeconds: interval,
+            clockSetAt: clockSetAt,
             characteristics: characteristics,
             packets: packets,
             warnings: warnings
@@ -108,7 +109,8 @@ enum InkbirdHistoryExportWriter {
                 packets: packets,
                 intervalSeconds: interval,
                 latestReading: latestReading,
-                mode: mode
+                mode: mode,
+                clockSetAt: clockSetAt
             )
             : []
         let csvURL: URL?
@@ -156,13 +158,15 @@ enum InkbirdHistoryExportWriter {
         packets: [InkbirdHistoryPacket],
         intervalSeconds: Int?,
         latestReading: InkbirdReading?,
-        mode: String
+        mode: String,
+        clockSetAt: Date?
     ) -> [InkbirdHistoryRecord] {
         if mode == "ith11b-official-trace" {
             return decodeITH11BRecords(
                 packets: packets,
                 intervalSeconds: intervalSeconds,
-                latestReading: latestReading
+                latestReading: latestReading,
+                clockSetAt: clockSetAt
             )
         }
 
@@ -211,25 +215,29 @@ enum InkbirdHistoryExportWriter {
         packets: [InkbirdHistoryPacket],
         intervalSeconds: Int?,
         latestReading: InkbirdReading?,
-        calendar: Calendar = .current
+        calendar: Calendar = .current,
+        clockSetAt: Date? = nil
     ) -> [InkbirdHistoryRecord] {
-        let records = decodeITH11BPacketRecords(packets)
-
-        guard !records.isEmpty else {
+        guard let intervalSeconds, intervalSeconds > 0,
+              let status = ith11BHistoryBlockStatus(from: packets),
+              status.isComplete
+        else {
             return []
         }
+        let records = Array(decodeITH11BPacketRecords(packets).prefix(status.expectedRecordCount))
 
         guard let anchor = ith11BHistoryAnchorDate(
             packets: packets,
             recordCount: records.count,
-            calendar: calendar
+            intervalSeconds: intervalSeconds,
+            calendar: calendar,
+            clockSetAt: clockSetAt
         ) else {
             return []
         }
-        let effectiveInterval = intervalSeconds ?? ith11BFallbackIntervalSeconds
         return records.enumerated().map { index, pair in
             return InkbirdHistoryRecord(
-                timestamp: anchor.addingTimeInterval(-Double(records.count - 1 - index) * Double(effectiveInterval)),
+                timestamp: anchor.addingTimeInterval(-Double(records.count - 1 - index) * Double(intervalSeconds)),
                 index: index,
                 temperatureCelsius: pair.temperatureCelsius,
                 humidityPercent: pair.humidityPercent
@@ -239,13 +247,12 @@ enum InkbirdHistoryExportWriter {
 
     static func ith11BExpectedRecordCount(from packets: [InkbirdHistoryPacket]) -> Int? {
         for packet in packets.reversed() where packet.command == "ith11b_history_command_02" {
-            guard let data = Data(hexString: packet.hex), data.count >= 4 else {
+            guard let data = Data(hexString: packet.hex),
+                  let header = InkbirdITH11BHistoryProtocol.historyHeader(from: data)
+            else {
                 continue
             }
-            return Int(data[0])
-                | (Int(data[1]) << 8)
-                | (Int(data[2]) << 16)
-                | (Int(data[3]) << 24)
+            return header.recordCount
         }
         return nil
     }
@@ -254,42 +261,61 @@ enum InkbirdHistoryExportWriter {
         decodeITH11BPacketRecords(packets).count
     }
 
+    static func ith11BHistoryBlockStatus(
+        from packets: [InkbirdHistoryPacket]
+    ) -> InkbirdITH11BHistoryProtocol.HistoryBlockStatus? {
+        guard let expectedRecordCount = ith11BExpectedRecordCount(from: packets) else {
+            return nil
+        }
+        let blocks = ith11BHistoryBlocks(packets)
+        return InkbirdITH11BHistoryProtocol.historyBlockStatus(
+            expectedRecordCount: expectedRecordCount,
+            blocks: blocks,
+            decodedRecordCount: decodeITH11BPacketRecords(packets).count
+        )
+    }
+
     private static func ith11BHistoryAnchorDate(
         packets: [InkbirdHistoryPacket],
         recordCount: Int,
-        calendar: Calendar
+        intervalSeconds: Int,
+        calendar: Calendar,
+        clockSetAt: Date?
     ) -> Date? {
         for packet in packets.reversed() where packet.command == "ith11b_history_command_02" {
-            guard let data = Data(hexString: packet.hex), data.count >= 11 else {
+            guard let data = Data(hexString: packet.hex),
+                  let header = InkbirdITH11BHistoryProtocol.historyHeader(from: data),
+                  header.recordCount == recordCount
+            else {
                 continue
             }
 
-            guard ith11BExpectedRecordCount(from: [packet]) == recordCount else {
-                continue
+            if header.hasZeroTimestamp {
+                guard let clockSetAt else {
+                    return nil
+                }
+                return InkbirdITH11BHistoryProtocol.roundedDownToInterval(
+                    clockSetAt,
+                    intervalSeconds: intervalSeconds
+                )
             }
 
-            let minute = Int(data[4])
-            let hour = Int(data[5])
-            let day = Int(data[7])
-            let month = Int(data[8])
-            let year = Int(data[9]) | (Int(data[10]) << 8)
-
-            guard (0...59).contains(minute),
-                  (0...23).contains(hour),
-                  (1...31).contains(day),
-                  (1...12).contains(month),
-                  (2000...2099).contains(year)
+            guard (0...59).contains(header.minute),
+                  (0...23).contains(header.hour),
+                  (1...31).contains(header.day),
+                  (1...12).contains(header.month),
+                  (2000...2099).contains(header.year)
             else {
                 continue
             }
 
             return calendar.date(from: DateComponents(
                 timeZone: calendar.timeZone,
-                year: year,
-                month: month,
-                day: day,
-                hour: hour,
-                minute: minute,
+                year: header.year,
+                month: header.month,
+                day: header.day,
+                hour: header.hour,
+                minute: header.minute,
                 second: 0
             ))
         }
@@ -298,13 +324,23 @@ enum InkbirdHistoryExportWriter {
     }
 
     private static func decodeITH11BPacketRecords(_ packets: [InkbirdHistoryPacket]) -> [(temperatureCelsius: Double, humidityPercent: Double)] {
-        let commandData = packets
-            .filter { $0.command == "ith11b_history_command_01" }
-            .compactMap { Data(hexString: $0.hex) }
-            .map(ith11BRecordPayload)
-            .reduce(Data(), +)
-        let commandRecords = decodeITH11BPayload(commandData)
-        return commandRecords
+        ith11BHistoryBlocks(packets).flatMap { decodeITH11BPayload($0.payload) }
+    }
+
+    private static func ith11BHistoryBlocks(
+        _ packets: [InkbirdHistoryPacket]
+    ) -> [InkbirdITH11BHistoryProtocol.HistoryBlock] {
+        var blocksBySequence: [Int: InkbirdITH11BHistoryProtocol.HistoryBlock] = [:]
+        for packet in packets where packet.command == "ith11b_history_command_01"
+            || packet.command == "ith11b_history_command_03" {
+            guard let data = Data(hexString: packet.hex),
+                  let block = InkbirdITH11BHistoryProtocol.historyBlock(from: data)
+            else {
+                continue
+            }
+            blocksBySequence[block.sequence] = block
+        }
+        return blocksBySequence.values.sorted { $0.sequence < $1.sequence }
     }
 
     private static func decodeITH11BPayload(_ data: Data) -> [(temperatureCelsius: Double, humidityPercent: Double)] {
@@ -332,17 +368,6 @@ enum InkbirdHistoryExportWriter {
             index += 4
         }
         return records
-    }
-
-    private static func ith11BRecordPayload(_ data: Data) -> Data {
-        // Observed compatible-sensor history notifications carry 4-byte records followed
-        // by a 2-byte packet trailer. Drop the trailer before concatenating
-        // notifications; otherwise the next packet is decoded two bytes out of
-        // phase and temperature/humidity appear swapped.
-        guard data.count > 4, data.count % 4 == 2 else {
-            return data
-        }
-        return Data(data.dropLast(2))
     }
 
     private static func decodeSignedSeries(

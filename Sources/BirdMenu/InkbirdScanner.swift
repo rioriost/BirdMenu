@@ -288,6 +288,7 @@ private final class HistoryFetchOperation: @unchecked Sendable {
         let quietTimeout: TimeInterval
         let maxTimeout: TimeInterval
         let readAfterWrite: Bool
+        var finishesOnWrite = false
     }
 
     private struct CommandAttempt {
@@ -297,18 +298,20 @@ private final class HistoryFetchOperation: @unchecked Sendable {
 
     private enum TransferMode {
         case legacyFFF8(CBCharacteristic)
-        case ith11BTrace(config: CBCharacteristic, clock: CBCharacteristic)
+        case ith11BTrace(command: CBCharacteristic, clock: CBCharacteristic, missingBlocks: CBCharacteristic)
         case readOnlySnapshot
     }
 
     private static let inkbirdServiceUUID = CBUUID(string: "0000FFF0-0000-1000-8000-00805F9B34FB")
     private static let configCharacteristicUUID = CBUUID(string: "0000FFF1-0000-1000-8000-00805F9B34FB")
     private static let ith11BConfigCharacteristicUUID = CBUUID(string: "0000FFF5-0000-1000-8000-00805F9B34FB")
+    private static let ith11BMissingBlocksCharacteristicUUID = CBUUID(string: "0000FFF3-0000-1000-8000-00805F9B34FB")
     private static let ith11BCommandCharacteristicUUID = CBUUID(string: "0000FFF4-0000-1000-8000-00805F9B34FB")
     private static let notifyCharacteristicUUID = CBUUID(string: "0000FFF6-0000-1000-8000-00805F9B34FB")
     private static let ith11BClockCharacteristicUUID = CBUUID(string: "0000FFF7-0000-1000-8000-00805F9B34FB")
     private static let historyCharacteristicUUID = CBUUID(string: "0000FFF8-0000-1000-8000-00805F9B34FB")
     private static let operationTimeout: TimeInterval = 2_400
+    private static let maxMissingBlockRetryRounds = 3
 
     private let centralManager: CBCentralManager
     private let peripheral: CBPeripheral
@@ -331,6 +334,7 @@ private final class HistoryFetchOperation: @unchecked Sendable {
     private var commandAttempts: [CommandAttempt] = []
     private var notifyCharacteristics: [CBCharacteristic] = []
     private var configData: Data?
+    private var clockSetAt: Date?
     private var commandAttemptIndex = 0
     private var currentAttempt: CommandAttempt?
     private var currentAttemptReceivedPacket = false
@@ -347,6 +351,8 @@ private final class HistoryFetchOperation: @unchecked Sendable {
     private var hasStartedCommands = false
     private var modeName = "read-only-gatt-snapshot"
     private var shouldDecodeHistory = false
+    private var issuedCommandNames: Set<String> = []
+    private var missingBlockRetryRound = 0
 
     init(
         centralManager: CBCentralManager,
@@ -440,8 +446,13 @@ private final class HistoryFetchOperation: @unchecked Sendable {
             modeName = "fff8-history"
             shouldDecodeHistory = true
         } else if let ith11BCommandCharacteristic = allDiscoveredCharacteristics.first(where: { $0.uuid == Self.ith11BCommandCharacteristicUUID }),
-                  let ith11BClockCharacteristic = allDiscoveredCharacteristics.first(where: { $0.uuid == Self.ith11BClockCharacteristicUUID }) {
-            transferMode = .ith11BTrace(config: ith11BCommandCharacteristic, clock: ith11BClockCharacteristic)
+                  let ith11BClockCharacteristic = allDiscoveredCharacteristics.first(where: { $0.uuid == Self.ith11BClockCharacteristicUUID }),
+                  let ith11BMissingBlocksCharacteristic = allDiscoveredCharacteristics.first(where: { $0.uuid == Self.ith11BMissingBlocksCharacteristicUUID }) {
+            transferMode = .ith11BTrace(
+                command: ith11BCommandCharacteristic,
+                clock: ith11BClockCharacteristic,
+                missingBlocks: ith11BMissingBlocksCharacteristic
+            )
             modeName = "ith11b-official-trace"
             shouldDecodeHistory = true
             warnings.append(
@@ -540,7 +551,9 @@ private final class HistoryFetchOperation: @unchecked Sendable {
             return
         }
 
-        if currentAttempt?.command.readAfterWrite == true, characteristic.properties.contains(.read), !completed {
+        if currentAttempt?.command.finishesOnWrite == true {
+            finishCurrentCommand()
+        } else if currentAttempt?.command.readAfterWrite == true, characteristic.properties.contains(.read), !completed {
             peripheral.readValue(for: characteristic)
         }
     }
@@ -569,9 +582,9 @@ private final class HistoryFetchOperation: @unchecked Sendable {
             return
         case let .legacyFFF8(characteristic):
             commandAttempts = historyCommands.map { CommandAttempt(command: $0, characteristic: characteristic) }
-        case let .ith11BTrace(configCharacteristic, clockCharacteristic):
+        case let .ith11BTrace(commandCharacteristic, clockCharacteristic, _):
             commandAttempts = ith11BTraceCommandAttempts(
-                configCharacteristic: configCharacteristic,
+                commandCharacteristic: commandCharacteristic,
                 clockCharacteristic: clockCharacteristic
             )
         }
@@ -594,19 +607,37 @@ private final class HistoryFetchOperation: @unchecked Sendable {
         currentAttemptReceivedPacket = false
         let command = attempt.command
         let characteristic = attempt.characteristic
+        if command.name == "ith11b_history_command_04" {
+            let status = InkbirdHistoryExportWriter.ith11BHistoryBlockStatus(from: packets)
+            let records = InkbirdHistoryExportWriter.decodeITH11BRecords(
+                packets: packets,
+                intervalSeconds: InkbirdHistoryExportWriter.intervalSeconds(from: configData),
+                latestReading: latestReading,
+                clockSetAt: clockSetAt
+            )
+            guard let status, status.isComplete, records.count == status.expectedRecordCount else {
+                fail(HistoryFetchError.historyFlowIncomplete(
+                    "history blocks or timestamps could not be validated before command 04"
+                ))
+                return
+            }
+        }
         let writeType: CBCharacteristicWriteType = characteristic.properties.contains(.write) ? .withResponse : .withoutResponse
         BirdMenuLog.debugData("history.command write name=\(command.name) value=\(command.value.hexString) char=\(characteristic.uuid.uuidString) type=\(writeType == .withResponse ? "withResponse" : "withoutResponse")")
+        issuedCommandNames.insert(command.name)
         peripheral.writeValue(command.value, for: characteristic, type: writeType)
+        maxTimer = Timer.scheduledTimer(withTimeInterval: command.maxTimeout, repeats: false) { [weak self] _ in
+            BirdMenuLog.debugData("history.command maxTimeout name=\(command.name)")
+            self?.fail(HistoryFetchError.timedOut(command.name))
+        }
         if writeType == .withoutResponse {
-            if command.readAfterWrite, characteristic.properties.contains(.read) {
+            if command.finishesOnWrite {
+                finishCurrentCommand()
+            } else if command.readAfterWrite, characteristic.properties.contains(.read) {
                 peripheral.readValue(for: characteristic)
             } else {
                 scheduleQuietTimer()
             }
-        }
-        maxTimer = Timer.scheduledTimer(withTimeInterval: command.maxTimeout, repeats: false) { [weak self] _ in
-            BirdMenuLog.debugData("history.command maxTimeout name=\(command.name)")
-            self?.fail(HistoryFetchError.timedOut(command.name))
         }
     }
 
@@ -622,8 +653,16 @@ private final class HistoryFetchOperation: @unchecked Sendable {
             if let commandName = self?.currentAttempt?.command.name {
                 BirdMenuLog.debugData("history.command quietTimeout name=\(commandName)")
             }
-            self?.finishCurrentCommand()
+            self?.handleQuietTimeout()
         }
+    }
+
+    private func handleQuietTimeout() {
+        if isCurrentITH11BHistoryContentCommand() {
+            requestMissingITH11BHistoryBlocks()
+            return
+        }
+        finishCurrentCommand()
     }
 
     private func finishCurrentCommand() {
@@ -633,18 +672,83 @@ private final class HistoryFetchOperation: @unchecked Sendable {
     }
 
     private func shouldFinishITH11BHistoryContentCommand() -> Bool {
-        guard currentAttempt?.command.name == "ith11b_history_command_01" else {
+        guard isCurrentITH11BHistoryContentCommand() else {
             return false
         }
-        guard let expectedCount = InkbirdHistoryExportWriter.ith11BExpectedRecordCount(from: packets), expectedCount > 0 else {
+        guard let status = InkbirdHistoryExportWriter.ith11BHistoryBlockStatus(from: packets),
+              status.isComplete
+        else {
             return false
         }
-        let decodedCount = InkbirdHistoryExportWriter.decodedITH11BRecordCount(from: packets)
-        guard decodedCount >= expectedCount else {
-            return false
-        }
-        BirdMenuLog.debugData("history.command expectedRecordCountReached expected=\(expectedCount) decoded=\(decodedCount)")
+        BirdMenuLog.debugData(
+            "history.command complete expected=\(status.expectedRecordCount) decoded=\(status.decodedRecordCount) blocks=\(status.receivedSequences)"
+        )
         return true
+    }
+
+    private func isCurrentITH11BHistoryContentCommand() -> Bool {
+        let name = currentAttempt?.command.name
+        return name == "ith11b_history_command_01" || name == "ith11b_history_command_03"
+    }
+
+    private func requestMissingITH11BHistoryBlocks() {
+        guard let status = InkbirdHistoryExportWriter.ith11BHistoryBlockStatus(from: packets) else {
+            fail(HistoryFetchError.historyFlowIncomplete("history header was not received"))
+            return
+        }
+        if status.isComplete {
+            finishCurrentCommand()
+            return
+        }
+        guard !status.missingSequences.isEmpty else {
+            fail(HistoryFetchError.historyFlowIncomplete(
+                "received all blocks but decoded \(status.decodedRecordCount) of \(status.expectedRecordCount) records"
+            ))
+            return
+        }
+        guard missingBlockRetryRound < Self.maxMissingBlockRetryRounds else {
+            fail(HistoryFetchError.historyFlowIncomplete(
+                "missing blocks after \(missingBlockRetryRound) retries: \(status.missingSequences)"
+            ))
+            return
+        }
+        guard case let .ith11BTrace(commandCharacteristic, _, missingBlocksCharacteristic) = transferMode,
+              let request = InkbirdITH11BHistoryProtocol.missingBlockRequest(sequences: status.missingSequences)
+        else {
+            fail(HistoryFetchError.historyFlowIncomplete("could not build the missing-block request"))
+            return
+        }
+
+        missingBlockRetryRound += 1
+        let round = missingBlockRetryRound
+        BirdMenuLog.debugData(
+            "history.command retryMissingBlocks round=\(round) missing=\(status.missingSequences) received=\(status.receivedSequences)"
+        )
+        let retryAttempts = [
+            CommandAttempt(
+                command: Command(
+                    name: "ith11b_missing_blocks_round_\(round)",
+                    value: request,
+                    quietTimeout: 0,
+                    maxTimeout: 10,
+                    readAfterWrite: false,
+                    finishesOnWrite: true
+                ),
+                characteristic: missingBlocksCharacteristic
+            ),
+            CommandAttempt(
+                command: Command(
+                    name: "ith11b_history_command_03",
+                    value: Data([0x03]),
+                    quietTimeout: 2,
+                    maxTimeout: 120,
+                    readAfterWrite: false
+                ),
+                characteristic: commandCharacteristic
+            )
+        ]
+        commandAttempts.insert(contentsOf: retryAttempts, at: commandAttemptIndex)
+        finishCurrentCommand()
     }
 
     private func errorWithFailureDumpIfUseful(_ error: Error) -> Error {
@@ -672,7 +776,8 @@ private final class HistoryFetchOperation: @unchecked Sendable {
                 packets: packets,
                 warnings: warnings + ["Fetch failed: \(error.localizedDescription)"],
                 mode: modeName,
-                decodeHistory: shouldDecodeHistory
+                decodeHistory: shouldDecodeHistory,
+                clockSetAt: clockSetAt
             )
             BirdMenuLog.debugData("history.operation wroteFailureDump raw=\(result.rawURL.path) csv=\(result.csvURL?.path ?? "-") packets=\(result.packetCount) records=\(result.recordCount)")
             return result
@@ -701,7 +806,8 @@ private final class HistoryFetchOperation: @unchecked Sendable {
                 packets: packets,
                 warnings: warnings,
                 mode: modeName,
-                decodeHistory: shouldDecodeHistory
+                decodeHistory: shouldDecodeHistory,
+                clockSetAt: clockSetAt
             )
             BirdMenuLog.debugData("history.operation wrote raw=\(result.rawURL.path) csv=\(result.csvURL?.path ?? "-") packets=\(result.packetCount) records=\(result.recordCount)")
             completion(.success(result))
@@ -724,21 +830,23 @@ private final class HistoryFetchOperation: @unchecked Sendable {
                 throw HistoryFetchError.historyFlowIncomplete("missing \(missing.joined(separator: ", "))")
             }
         case .ith11BTrace:
-            let requiredCommands = [
-                "ith11b_history_command_02",
-                "ith11b_history_command_01",
-                "ith11b_history_command_04"
-            ]
-            let missing = requiredCommands.filter { command in
-                !packets.contains { $0.command == command }
+            guard packets.contains(where: { $0.command == "ith11b_history_command_02" }) else {
+                throw HistoryFetchError.historyFlowIncomplete("missing history header")
             }
-            if !missing.isEmpty {
-                throw HistoryFetchError.historyFlowIncomplete("missing \(missing.joined(separator: ", "))")
+            guard issuedCommandNames.contains("ith11b_history_command_01"),
+                  issuedCommandNames.contains("ith11b_history_command_04"),
+                  issuedCommandNames.contains("ith11b_session_command_05")
+            else {
+                throw HistoryFetchError.historyFlowIncomplete("history content, completion, or session-close command was not issued")
+            }
+            guard let status = InkbirdHistoryExportWriter.ith11BHistoryBlockStatus(from: packets), status.isComplete else {
+                throw HistoryFetchError.historyFlowIncomplete("history block set was incomplete")
             }
             let records = InkbirdHistoryExportWriter.decodeITH11BRecords(
                 packets: packets,
                 intervalSeconds: InkbirdHistoryExportWriter.intervalSeconds(from: configData),
-                latestReading: latestReading
+                latestReading: latestReading,
+                clockSetAt: clockSetAt
             )
             guard !records.isEmpty else {
                 throw HistoryFetchError.historyDecodeFailed
@@ -772,17 +880,20 @@ private final class HistoryFetchOperation: @unchecked Sendable {
     }
 
     private func ith11BTraceCommandAttempts(
-        configCharacteristic: CBCharacteristic,
+        commandCharacteristic: CBCharacteristic,
         clockCharacteristic: CBCharacteristic
     ) -> [CommandAttempt] {
-        [
+        let clockSetAt = Date()
+        self.clockSetAt = clockSetAt
+        return [
             CommandAttempt(
                 command: Command(
                     name: "ith11b_set_clock",
-                    value: InkbirdITH11BHistoryProtocol.timestampCommand(),
-                    quietTimeout: 0.05,
+                    value: InkbirdITH11BHistoryProtocol.timestampCommand(for: clockSetAt),
+                    quietTimeout: 0,
                     maxTimeout: 5,
-                    readAfterWrite: false
+                    readAfterWrite: false,
+                    finishesOnWrite: true
                 ),
                 characteristic: clockCharacteristic
             ),
@@ -794,27 +905,39 @@ private final class HistoryFetchOperation: @unchecked Sendable {
                     maxTimeout: 10,
                     readAfterWrite: false
                 ),
-                characteristic: configCharacteristic
+                characteristic: commandCharacteristic
             ),
             CommandAttempt(
                 command: Command(
                     name: "ith11b_history_command_01",
                     value: Data([0x01]),
-                    quietTimeout: 30,
+                    quietTimeout: 2,
                     maxTimeout: 1_800,
                     readAfterWrite: false
                 ),
-                characteristic: configCharacteristic
+                characteristic: commandCharacteristic
             ),
             CommandAttempt(
                 command: Command(
                     name: "ith11b_history_command_04",
                     value: Data([0x04]),
-                    quietTimeout: 3,
+                    quietTimeout: 0,
                     maxTimeout: 60,
-                    readAfterWrite: false
+                    readAfterWrite: false,
+                    finishesOnWrite: true
                 ),
-                characteristic: configCharacteristic
+                characteristic: commandCharacteristic
+            ),
+            CommandAttempt(
+                command: Command(
+                    name: "ith11b_session_command_05",
+                    value: Data([0x05]),
+                    quietTimeout: 0,
+                    maxTimeout: 10,
+                    readAfterWrite: false,
+                    finishesOnWrite: true
+                ),
+                characteristic: commandCharacteristic
             )
         ]
     }

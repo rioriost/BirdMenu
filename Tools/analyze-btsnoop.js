@@ -158,6 +158,7 @@ function btsnoopDate(timestampRaw) {
 }
 
 function parseApplePacketLogger(buffer) {
+  const timestampBasis = "device-local-wall-clock";
   let offset = 0;
   let recordIndex = 0;
   const rows = [];
@@ -172,9 +173,11 @@ function parseApplePacketLogger(buffer) {
   while (offset + 13 <= buffer.length) {
     const recordLength = buffer.readUInt32LE(offset);
     if (recordLength < 9 || offset + 4 + recordLength > buffer.length) {
-      return recordIndex > 0 ? { format: "apple-packetlogger", metadata, hciCommands, advertisingReports, rows } : null;
+      return recordIndex > 0 ? { format: "apple-packetlogger", timestampBasis, metadata, hciCommands, advertisingReports, rows } : null;
     }
-    const packetTimestamp = new Date(recordIndex);
+    const seconds = buffer.readUInt32LE(offset + 4);
+    const microseconds = buffer.readUInt32LE(offset + 8);
+    const packetTimestamp = new Date((seconds * 1000) + (microseconds / 1000));
     const packetType = buffer[offset + 12];
     const payload = buffer.subarray(offset + 13, offset + 4 + recordLength);
     offset += 4 + recordLength;
@@ -230,7 +233,7 @@ function parseApplePacketLogger(buffer) {
 
   applyHandleMetadata(rows, handleMap, descriptorMap);
 
-  return { format: "apple-packetlogger", metadata, hciCommands, advertisingReports, rows };
+  return { format: "apple-packetlogger", timestampBasis, metadata, hciCommands, advertisingReports, rows };
 }
 
 function applyHandleMetadata(rows, handleMap, descriptorMap) {
@@ -307,6 +310,7 @@ function printApplePacketLogger(capture) {
     process.stdout.write(JSON.stringify({
       source: path,
       format: capture.format,
+      timestampBasis: capture.timestampBasis,
       metadata: capture.metadata,
       hciCommands: capture.hciCommands,
       advertisingReports: interestingAdvertisements,
@@ -319,6 +323,7 @@ function printApplePacketLogger(capture) {
   }
 
   console.log("Apple PacketLogger capture");
+  console.log("timestamps: device-local wall clock (the trailing Z is serialization, not UTC evidence)");
   for (const item of capture.metadata) {
     console.log(`metadata: ${item}`);
   }
