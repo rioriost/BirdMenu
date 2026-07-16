@@ -115,6 +115,24 @@ enum InkbirdITH11BHistoryProtocol {
         )
     }
 
+    static func isExpectedSessionCloseDisconnect(
+        issuedCommandNames: Set<String>,
+        status: HistoryBlockStatus?
+    ) -> Bool {
+        let requiredCommands: Set<String> = [
+            "ith11b_history_command_01",
+            "ith11b_history_command_04",
+            "ith11b_session_command_05"
+        ]
+        guard requiredCommands.isSubset(of: issuedCommandNames),
+              let status,
+              status.isComplete
+        else {
+            return false
+        }
+        return status.decodedRecordCount == status.expectedRecordCount
+    }
+
     static func missingBlockRequest(sequences: [Int]) -> Data? {
         guard !sequences.isEmpty, sequences.count <= historyBlockSize / 2,
               sequences.allSatisfy({ (1...Int(UInt16.max)).contains($0) })

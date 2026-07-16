@@ -123,6 +123,40 @@ private func historyBlockPacket(
     #expect(InkbirdHistoryExportWriter.intervalSeconds(from: config) == 300)
 }
 
+@Test func acceptsDisconnectAfterCompleteITH11BSessionClose() {
+    let status = InkbirdITH11BHistoryProtocol.HistoryBlockStatus(
+        expectedRecordCount: 367,
+        expectedBlockCount: 9,
+        receivedSequences: Array(1...9),
+        missingSequences: [],
+        decodedRecordCount: 367
+    )
+    let completedCommands: Set<String> = [
+        "ith11b_history_command_01",
+        "ith11b_history_command_04",
+        "ith11b_session_command_05"
+    ]
+
+    #expect(InkbirdITH11BHistoryProtocol.isExpectedSessionCloseDisconnect(
+        issuedCommandNames: completedCommands,
+        status: status
+    ))
+    #expect(!InkbirdITH11BHistoryProtocol.isExpectedSessionCloseDisconnect(
+        issuedCommandNames: completedCommands.subtracting(["ith11b_session_command_05"]),
+        status: status
+    ))
+    #expect(!InkbirdITH11BHistoryProtocol.isExpectedSessionCloseDisconnect(
+        issuedCommandNames: completedCommands,
+        status: InkbirdITH11BHistoryProtocol.HistoryBlockStatus(
+            expectedRecordCount: 367,
+            expectedBlockCount: 9,
+            receivedSequences: Array(1...8),
+            missingSequences: [9],
+            decodedRecordCount: 360
+        )
+    ))
+}
+
 @Test func decodesITH11BHistoryPayload() throws {
     let calendar = tokyoCalendar()
     let anchor = try #require(calendar.date(from: DateComponents(

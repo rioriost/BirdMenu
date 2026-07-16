@@ -390,6 +390,15 @@ private final class HistoryFetchOperation: @unchecked Sendable {
         guard peripheral.identifier == self.peripheral.identifier, !completed else {
             return
         }
+        if case .ith11BTrace = transferMode,
+           InkbirdITH11BHistoryProtocol.isExpectedSessionCloseDisconnect(
+               issuedCommandNames: issuedCommandNames,
+               status: InkbirdHistoryExportWriter.ith11BHistoryBlockStatus(from: packets)
+           ) {
+            BirdMenuLog.debugData("history.operation completedBySessionCloseDisconnect")
+            finish()
+            return
+        }
         fail(error ?? HistoryFetchError.disconnected)
     }
 
