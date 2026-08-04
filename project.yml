@@ -8,8 +8,8 @@ settings:
     DEVELOPMENT_TEAM: 23889H77KX
     SWIFT_VERSION: "6.0"
     MACOSX_DEPLOYMENT_TARGET: "13.0"
-    CURRENT_PROJECT_VERSION: "9"
-    MARKETING_VERSION: "1.1.5"
+    CURRENT_PROJECT_VERSION: "10"
+    MARKETING_VERSION: "1.2.0"
 targets:
   BirdMenu:
     type: application
@@ -18,6 +18,8 @@ targets:
     sources:
       - path: Sources/BirdMenu
       - path: Resources/BirdMenu.icns
+        buildPhase: resources
+      - path: Resources/PrivacyInfo.xcprivacy
         buildPhase: resources
       - path: BirdMenu.entitlements
         buildPhase: none
