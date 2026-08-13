@@ -32,6 +32,71 @@ enum InkbirdITH11BHistoryProtocol {
         }
     }
 
+    struct MissingBlockRecoveryTracker {
+        enum Decision: Equatable {
+            case retry(round: Int)
+            case complete
+            case stalled(retryRounds: Int, missingSequences: [Int])
+            case timedOut(retryRounds: Int, missingSequences: [Int])
+        }
+
+        let maxConsecutiveNoProgressRounds: Int
+        let timeout: TimeInterval
+
+        private(set) var retryRound = 0
+        private(set) var consecutiveNoProgressRounds = 0
+        private var receivedBlockCountAtLastRequest: Int?
+        private var startedAt: Date?
+
+        init(
+            maxConsecutiveNoProgressRounds: Int = 3,
+            timeout: TimeInterval = 300
+        ) {
+            precondition(maxConsecutiveNoProgressRounds > 0)
+            precondition(timeout > 0)
+            self.maxConsecutiveNoProgressRounds = maxConsecutiveNoProgressRounds
+            self.timeout = timeout
+        }
+
+        mutating func nextDecision(
+            status: HistoryBlockStatus,
+            at now: Date = Date()
+        ) -> Decision {
+            if status.isComplete {
+                return .complete
+            }
+
+            if let startedAt, now.timeIntervalSince(startedAt) >= timeout {
+                return .timedOut(
+                    retryRounds: retryRound,
+                    missingSequences: status.missingSequences
+                )
+            }
+
+            if let previousCount = receivedBlockCountAtLastRequest {
+                if status.receivedSequences.count > previousCount {
+                    consecutiveNoProgressRounds = 0
+                } else {
+                    consecutiveNoProgressRounds += 1
+                }
+            }
+
+            if consecutiveNoProgressRounds >= maxConsecutiveNoProgressRounds {
+                return .stalled(
+                    retryRounds: retryRound,
+                    missingSequences: status.missingSequences
+                )
+            }
+
+            if startedAt == nil {
+                startedAt = now
+            }
+            retryRound += 1
+            receivedBlockCountAtLastRequest = status.receivedSequences.count
+            return .retry(round: retryRound)
+        }
+    }
+
     static let historyRecordSize = 4
     static let historyBlockPayloadSize = 180
     static let historyRecordsPerBlock = historyBlockPayloadSize / historyRecordSize

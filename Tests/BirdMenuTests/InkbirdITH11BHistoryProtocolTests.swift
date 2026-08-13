@@ -374,6 +374,72 @@ private func historyBlockPacket(
     #expect(request.prefix(4) == Data([0x02, 0x00, 0x00, 0x00]))
 }
 
+@Test func continuesMissingBlockRecoveryWhileNewBlocksArrive() {
+    var tracker = InkbirdITH11BHistoryProtocol.MissingBlockRecoveryTracker()
+    let start = Date(timeIntervalSince1970: 1_000)
+
+    #expect(tracker.nextDecision(
+        status: recoveryStatus(receivedSequences: [1, 3, 11, 13]),
+        at: start
+    ) == .retry(round: 1))
+    #expect(tracker.nextDecision(
+        status: recoveryStatus(receivedSequences: [1, 2, 3, 6, 8, 11, 12, 13]),
+        at: start.addingTimeInterval(10)
+    ) == .retry(round: 2))
+    #expect(tracker.nextDecision(
+        status: recoveryStatus(receivedSequences: [1, 2, 3, 4, 6, 7, 8, 11, 12, 13, 14]),
+        at: start.addingTimeInterval(20)
+    ) == .retry(round: 3))
+    #expect(tracker.nextDecision(
+        status: recoveryStatus(receivedSequences: [1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 13, 14]),
+        at: start.addingTimeInterval(30)
+    ) == .retry(round: 4))
+    #expect(tracker.nextDecision(
+        status: recoveryStatus(receivedSequences: Array(1...14), decodedRecordCount: 620),
+        at: start.addingTimeInterval(40)
+    ) == .complete)
+}
+
+@Test func stopsMissingBlockRecoveryAfterConsecutiveNoProgressRounds() {
+    var tracker = InkbirdITH11BHistoryProtocol.MissingBlockRecoveryTracker(
+        maxConsecutiveNoProgressRounds: 3,
+        timeout: 300
+    )
+    let start = Date(timeIntervalSince1970: 1_000)
+    let status = recoveryStatus(receivedSequences: [1, 2, 3, 4])
+
+    #expect(tracker.nextDecision(status: status, at: start) == .retry(round: 1))
+    #expect(tracker.nextDecision(
+        status: status,
+        at: start.addingTimeInterval(5)
+    ) == .retry(round: 2))
+    #expect(tracker.nextDecision(
+        status: status,
+        at: start.addingTimeInterval(10)
+    ) == .retry(round: 3))
+    #expect(tracker.nextDecision(
+        status: status,
+        at: start.addingTimeInterval(15)
+    ) == .stalled(retryRounds: 3, missingSequences: Array(5...14)))
+}
+
+@Test func timesOutMissingBlockRecoveryEvenWhenProgressContinues() {
+    var tracker = InkbirdITH11BHistoryProtocol.MissingBlockRecoveryTracker(
+        maxConsecutiveNoProgressRounds: 3,
+        timeout: 30
+    )
+    let start = Date(timeIntervalSince1970: 1_000)
+
+    #expect(tracker.nextDecision(
+        status: recoveryStatus(receivedSequences: [1, 2, 3, 4]),
+        at: start
+    ) == .retry(round: 1))
+    #expect(tracker.nextDecision(
+        status: recoveryStatus(receivedSequences: [1, 2, 3, 4, 5]),
+        at: start.addingTimeInterval(31)
+    ) == .timedOut(retryRounds: 1, missingSequences: Array(6...14)))
+}
+
 @Test func sortsAndDeduplicatesRetransmittedITH11BBlocks() throws {
     let packets = [
         historyMetadataPacket(count: 90),
@@ -528,6 +594,73 @@ private func historyBlockPacket(
     #expect(records.count == 590)
     #expect(records.last?.timestamp == expectedAnchor)
     #expect(records.first?.timestamp == expectedAnchor.addingTimeInterval(-589 * 300))
+}
+
+@Test func decodes620RecordsRecoveredAcrossMultipleRetryRounds() throws {
+    let calendar = tokyoCalendar()
+    let clockSetAt = try #require(calendar.date(from: DateComponents(
+        timeZone: calendar.timeZone,
+        year: 2026,
+        month: 8,
+        day: 12,
+        hour: 18,
+        minute: 22,
+        second: 18
+    )))
+    var packets = [historyMetadataPacket(
+        count: 620,
+        minute: 0,
+        hour: 0,
+        weekday: 0,
+        day: 0,
+        month: 0,
+        year: 0
+    )]
+    let initialSequences = [1, 3, 11, 13]
+    let recoveredSequences = [2, 6, 8, 12, 4, 7, 14, 5, 9, 10]
+    for sequence in initialSequences + recoveredSequences {
+        let recordCount = sequence == 14 ? 35 : 45
+        packets.append(historyBlockPacket(
+            sequence: sequence,
+            payloadHex: String(repeating: "1c01fa02", count: recordCount),
+            command: initialSequences.contains(sequence)
+                ? "ith11b_history_command_01"
+                : "ith11b_history_command_03"
+        ))
+    }
+
+    let status = try #require(InkbirdHistoryExportWriter.ith11BHistoryBlockStatus(from: packets))
+    let records = InkbirdHistoryExportWriter.decodeITH11BRecords(
+        packets: packets,
+        intervalSeconds: 300,
+        latestReading: nil,
+        calendar: calendar,
+        clockSetAt: clockSetAt
+    )
+
+    #expect(status.isComplete)
+    #expect(status.receivedSequences == Array(1...14))
+    #expect(status.decodedRecordCount == 620)
+    #expect(records.count == 620)
+    #expect(records.last?.timestamp == InkbirdITH11BHistoryProtocol.roundedDownToInterval(
+        clockSetAt,
+        intervalSeconds: 300
+    ))
+}
+
+private func recoveryStatus(
+    receivedSequences: [Int],
+    decodedRecordCount: Int? = nil
+) -> InkbirdITH11BHistoryProtocol.HistoryBlockStatus {
+    let expectedSequences = Set(1...14)
+    let received = Set(receivedSequences)
+    return InkbirdITH11BHistoryProtocol.HistoryBlockStatus(
+        expectedRecordCount: 620,
+        expectedBlockCount: 14,
+        receivedSequences: received.sorted(),
+        missingSequences: expectedSequences.subtracting(received).sorted(),
+        decodedRecordCount: decodedRecordCount ?? received.count * 45
+    )
 }
 
 @Test func chartGroupsRecordsByLocalDayInProvidedTimeZone() throws {

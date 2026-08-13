@@ -1,7 +1,7 @@
 APP_NAME := BirdMenu
 APP_BUNDLE_ID := st.rio.birdmenu
 APP_VERSION := 1.2.0
-APP_BUILD := 10
+APP_BUILD := 14
 BUILD_DIR := .build/release
 APP_DIR := build/$(APP_NAME).app
 ENTITLEMENTS := BirdMenu.entitlements
@@ -48,6 +48,7 @@ app: build
 	plutil -replace CFBundleShortVersionString -string "$(APP_VERSION)" "$(STAGING_CONTENTS_DIR)/Info.plist"
 	plutil -replace CFBundleVersion -string "$(APP_BUILD)" "$(STAGING_CONTENTS_DIR)/Info.plist"
 	cp Resources/BirdMenu.icns "$(STAGING_RESOURCES_DIR)/BirdMenu.icns"
+	cp Resources/PrivacyInfo.xcprivacy "$(STAGING_RESOURCES_DIR)/PrivacyInfo.xcprivacy"
 	$(SCRUB_XATTRS)
 	codesign --force --sign "$(CODE_SIGN_IDENTITY)" $(CODE_SIGN_OPTIONS) --entitlements "$(ENTITLEMENTS)" "$(STAGING_APP_DIR)"
 	$(SCRUB_XATTRS)
