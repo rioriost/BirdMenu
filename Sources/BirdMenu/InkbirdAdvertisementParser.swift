@@ -1,7 +1,7 @@
 @preconcurrency import CoreBluetooth
 import Foundation
 
-struct InkbirdReading: Equatable {
+struct InkbirdReading: Equatable, Sendable {
     let model: String
     let deviceName: String
     let peripheralID: UUID

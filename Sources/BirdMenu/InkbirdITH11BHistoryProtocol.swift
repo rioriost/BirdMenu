@@ -1,7 +1,7 @@
 import Foundation
 
 enum InkbirdITH11BHistoryProtocol {
-    struct HistoryHeader: Equatable {
+    struct HistoryHeader: Equatable, Sendable {
         let recordCount: Int
         let minute: Int
         let hour: Int
@@ -15,12 +15,12 @@ enum InkbirdITH11BHistoryProtocol {
         }
     }
 
-    struct HistoryBlock: Equatable {
+    struct HistoryBlock: Equatable, Sendable {
         let sequence: Int
         let payload: Data
     }
 
-    struct HistoryBlockStatus: Equatable {
+    struct HistoryBlockStatus: Equatable, Sendable {
         let expectedRecordCount: Int
         let expectedBlockCount: Int
         let receivedSequences: [Int]
@@ -28,7 +28,7 @@ enum InkbirdITH11BHistoryProtocol {
         let decodedRecordCount: Int
 
         var isComplete: Bool {
-            missingSequences.isEmpty && decodedRecordCount >= expectedRecordCount
+            missingSequences.isEmpty && decodedRecordCount == expectedRecordCount
         }
     }
 
@@ -36,63 +36,58 @@ enum InkbirdITH11BHistoryProtocol {
         enum Decision: Equatable {
             case retry(round: Int)
             case complete
-            case stalled(retryRounds: Int, missingSequences: [Int])
+            case wait(TimeInterval)
             case timedOut(retryRounds: Int, missingSequences: [Int])
         }
 
-        let maxConsecutiveNoProgressRounds: Int
         let timeout: TimeInterval
-
+        let retryInterval: TimeInterval
         private(set) var retryRound = 0
-        private(set) var consecutiveNoProgressRounds = 0
-        private var receivedBlockCountAtLastRequest: Int?
-        private var startedAt: Date?
+        private var receivedBlockCount = 0
+        private var lastProgressAt: TimeInterval?
+        private var lastRequestAt: TimeInterval?
 
         init(
-            maxConsecutiveNoProgressRounds: Int = 3,
-            timeout: TimeInterval = 300
+            timeout: TimeInterval = 180,
+            retryInterval: TimeInterval = 15
         ) {
-            precondition(maxConsecutiveNoProgressRounds > 0)
             precondition(timeout > 0)
-            self.maxConsecutiveNoProgressRounds = maxConsecutiveNoProgressRounds
+            precondition(retryInterval > 0)
             self.timeout = timeout
+            self.retryInterval = retryInterval
+        }
+
+        mutating func observe(status: HistoryBlockStatus, at now: TimeInterval) {
+            if lastProgressAt == nil || status.receivedSequences.count > receivedBlockCount {
+                lastProgressAt = now
+                receivedBlockCount = status.receivedSequences.count
+            }
         }
 
         mutating func nextDecision(
             status: HistoryBlockStatus,
-            at now: Date = Date()
+            at now: TimeInterval = ProcessInfo.processInfo.systemUptime
         ) -> Decision {
+            observe(status: status, at: now)
             if status.isComplete {
                 return .complete
             }
-
-            if let startedAt, now.timeIntervalSince(startedAt) >= timeout {
+            if let lastProgressAt, now - lastProgressAt >= timeout {
                 return .timedOut(
                     retryRounds: retryRound,
                     missingSequences: status.missingSequences
                 )
             }
-
-            if let previousCount = receivedBlockCountAtLastRequest {
-                if status.receivedSequences.count > previousCount {
-                    consecutiveNoProgressRounds = 0
-                } else {
-                    consecutiveNoProgressRounds += 1
-                }
-            }
-
-            if consecutiveNoProgressRounds >= maxConsecutiveNoProgressRounds {
-                return .stalled(
-                    retryRounds: retryRound,
-                    missingSequences: status.missingSequences
-                )
-            }
-
-            if startedAt == nil {
-                startedAt = now
+            let backoff = min(retryInterval * pow(2, Double(min(retryRound, 2))), 60)
+            let eligibleAt = max(
+                (lastProgressAt ?? now) + retryInterval,
+                (lastRequestAt ?? (now - backoff)) + backoff
+            )
+            if now < eligibleAt {
+                return .wait(eligibleAt - now)
             }
             retryRound += 1
-            receivedBlockCountAtLastRequest = status.receivedSequences.count
+            lastRequestAt = now
             return .retry(round: retryRound)
         }
     }
@@ -132,7 +127,7 @@ enum InkbirdITH11BHistoryProtocol {
         guard data.count >= 11 else {
             return nil
         }
-        return HistoryHeader(
+        let header = HistoryHeader(
             recordCount: Int(data[0])
                 | (Int(data[1]) << 8)
                 | (Int(data[2]) << 16)
@@ -144,10 +139,21 @@ enum InkbirdITH11BHistoryProtocol {
             month: Int(data[8]),
             year: Int(data[9]) | (Int(data[10]) << 8)
         )
+        guard header.recordCount <= historyRecordsPerBlock * Int(UInt16.max),
+              header.hasZeroTimestamp || (
+                (0...59).contains(header.minute) && (0...23).contains(header.hour)
+                && (1...7).contains(header.weekday) && (1...31).contains(header.day)
+                && (1...12).contains(header.month) && (2000...2099).contains(header.year)
+              )
+        else {
+            return nil
+        }
+        return header
     }
 
     static func historyBlock(from data: Data) -> HistoryBlock? {
         guard data.count >= historyRecordSize + 2,
+              data.count <= historyBlockSize,
               data.count % historyRecordSize == 2
         else {
             return nil
@@ -161,8 +167,7 @@ enum InkbirdITH11BHistoryProtocol {
 
     static func historyBlockStatus(
         expectedRecordCount: Int,
-        blocks: [HistoryBlock],
-        decodedRecordCount: Int
+        blocks: [HistoryBlock]
     ) -> HistoryBlockStatus {
         let expectedBlockCount = expectedRecordCount > 0
             ? Int(ceil(Double(expectedRecordCount) / Double(historyRecordsPerBlock)))
@@ -170,14 +175,82 @@ enum InkbirdITH11BHistoryProtocol {
         let expectedSequences: Set<Int> = expectedBlockCount > 0
             ? Set(1...expectedBlockCount)
             : []
-        let receivedSequences = Set(blocks.map(\.sequence)).intersection(expectedSequences)
+        let validBlocks = blocks.filter { samples(in: $0, expectedRecordCount: expectedRecordCount) != nil }
+        let receivedSequences = Set(validBlocks.map(\.sequence)).intersection(expectedSequences)
         return HistoryBlockStatus(
             expectedRecordCount: expectedRecordCount,
             expectedBlockCount: expectedBlockCount,
             receivedSequences: receivedSequences.sorted(),
             missingSequences: expectedSequences.subtracting(receivedSequences).sorted(),
-            decodedRecordCount: decodedRecordCount
+            decodedRecordCount: receivedSequences.reduce(0) {
+                $0 + min(historyRecordsPerBlock, expectedRecordCount - ($1 - 1) * historyRecordsPerBlock)
+            }
         )
+    }
+
+    struct Sample: Equatable, Sendable {
+        let temperatureCelsius: Double
+        let humidityPercent: Double
+    }
+
+    struct BlockAccumulator: Sendable {
+        let expectedRecordCount: Int
+        private(set) var blocksBySequence: [Int: HistoryBlock] = [:]
+
+        @discardableResult
+        mutating func accept(_ block: HistoryBlock) -> Bool {
+            guard blocksBySequence[block.sequence] == nil,
+                  samples(in: block, expectedRecordCount: expectedRecordCount) != nil
+            else {
+                return false
+            }
+            blocksBySequence[block.sequence] = block
+            return true
+        }
+
+        var status: HistoryBlockStatus {
+            historyBlockStatus(expectedRecordCount: expectedRecordCount, blocks: Array(blocksBySequence.values))
+        }
+
+        var records: [Sample] {
+            blocksBySequence.values.sorted { $0.sequence < $1.sequence }.flatMap {
+                samples(in: $0, expectedRecordCount: expectedRecordCount) ?? []
+            }
+        }
+    }
+
+    static func samples(in block: HistoryBlock, expectedRecordCount: Int) -> [Sample]? {
+        let firstRecord = (block.sequence - 1) * historyRecordsPerBlock
+        guard block.sequence > 0, firstRecord >= 0, firstRecord < expectedRecordCount else {
+            return nil
+        }
+        let count = min(historyRecordsPerBlock, expectedRecordCount - firstRecord)
+        guard block.payload.count >= count * historyRecordSize,
+              block.payload.count <= historyBlockPayloadSize,
+              block.payload.count.isMultiple(of: historyRecordSize),
+              block.payload.dropFirst(count * historyRecordSize).allSatisfy({ $0 == 0 })
+        else {
+            return nil
+        }
+        var records: [Sample] = []
+        for index in stride(from: 0, to: count * historyRecordSize, by: historyRecordSize) {
+            let temperatureRaw = Int16(bitPattern: UInt16(block.payload[index]) | (UInt16(block.payload[index + 1]) << 8))
+            let humidityRaw = UInt16(block.payload[index + 2]) | (UInt16(block.payload[index + 3]) << 8)
+            let temperature = Double(temperatureRaw) / 10
+            let humidity = Double(humidityRaw) / 10
+            guard temperatureRaw != 0 || humidityRaw != 0,
+                  (-60.0...100.0).contains(temperature), (0.0...100.0).contains(humidity)
+            else {
+                return nil
+            }
+            records.append(Sample(temperatureCelsius: temperature, humidityPercent: humidity))
+        }
+        return records
+    }
+
+    static func isHistoryNotification(_ uuid: String) -> Bool {
+        let uuid = uuid.uppercased()
+        return uuid == "FFF6" || uuid == "0000FFF6-0000-1000-8000-00805F9B34FB"
     }
 
     static func isExpectedSessionCloseDisconnect(

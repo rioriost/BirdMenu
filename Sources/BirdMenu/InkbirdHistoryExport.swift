@@ -4,30 +4,31 @@ import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
-struct InkbirdHistoryResult {
+struct InkbirdHistoryResult: Sendable {
     let folderURL: URL
     let rawURL: URL
     let csvURL: URL?
     let recordCount: Int
     let packetCount: Int
-    let warnings: [String]
+    var warnings: [String]
+    var isComplete = true
 }
 
-struct InkbirdHistoryPacket: Codable {
+struct InkbirdHistoryPacket: Codable, Sendable {
     let command: String
     let characteristicUUID: String
     let timestamp: Date
     let hex: String
 }
 
-struct InkbirdGATTCharacteristicInfo: Codable {
+struct InkbirdGATTCharacteristicInfo: Codable, Sendable {
     let serviceUUID: String
     let characteristicUUID: String
     let properties: [String]
     let valueHex: String?
 }
 
-struct InkbirdHistoryRawDump: Codable {
+struct InkbirdHistoryRawDump: Codable, Sendable {
     let deviceName: String
     let peripheralID: String
     let fetchedAt: Date
@@ -39,8 +40,9 @@ struct InkbirdHistoryRawDump: Codable {
     let characteristics: [InkbirdGATTCharacteristicInfo]
     let packets: [InkbirdHistoryPacket]
     let warnings: [String]
+    var transferState: String?
 
-    struct LatestReadingSnapshot: Codable {
+    struct LatestReadingSnapshot: Codable, Sendable {
         let temperatureCelsius: Double
         let humidityPercent: Double?
         let batteryPercent: Int
@@ -49,7 +51,7 @@ struct InkbirdHistoryRawDump: Codable {
     }
 }
 
-struct InkbirdHistoryRecord {
+struct InkbirdHistoryRecord: Sendable {
     let timestamp: Date?
     let index: Int
     let temperatureCelsius: Double?
@@ -72,9 +74,12 @@ enum InkbirdHistoryExportWriter {
         warnings: [String],
         mode: String = "fff8-history",
         decodeHistory: Bool = true,
-        clockSetAt: Date? = nil
+        clockSetAt: Date? = nil,
+        folderURL: URL? = nil,
+        transferState: String? = nil
     ) throws -> InkbirdHistoryResult {
-        let folder = try outputFolder(deviceName: deviceName, peripheralID: peripheralID)
+        let folder = try folderURL ?? outputFolder(deviceName: deviceName, peripheralID: peripheralID)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let interval = intervalSeconds(from: config)
         let rawDump = InkbirdHistoryRawDump(
             deviceName: deviceName,
@@ -95,7 +100,8 @@ enum InkbirdHistoryExportWriter {
             clockSetAt: clockSetAt,
             characteristics: characteristics,
             packets: packets,
-            warnings: warnings
+            warnings: warnings,
+            transferState: transferState
         )
 
         let rawURL = folder.appendingPathComponent("raw-history.json")
@@ -122,7 +128,7 @@ enum InkbirdHistoryExportWriter {
             csvURL = nil
         }
 
-        return InkbirdHistoryResult(
+        var result = InkbirdHistoryResult(
             folderURL: folder,
             rawURL: rawURL,
             csvURL: csvURL,
@@ -130,6 +136,13 @@ enum InkbirdHistoryExportWriter {
             packetCount: packets.count,
             warnings: warnings
         )
+        result.isComplete = decodeHistory && (
+            mode == "ith11b-official-trace"
+                ? ith11BHistoryBlockStatus(from: packets)?.isComplete == true
+                    && records.count == ith11BExpectedRecordCount(from: packets)
+                : !records.isEmpty
+        )
+        return result
     }
 
     static func intervalSeconds(from config: Data?) -> Int? {
@@ -145,11 +158,11 @@ enum InkbirdHistoryExportWriter {
         return nil
     }
 
-    private static func outputFolder(deviceName: String, peripheralID: UUID) throws -> URL {
+    static func outputFolder(deviceName: String, peripheralID: UUID) throws -> URL {
         let root = historyRootFolderURL()
         let stamp = ISO8601DateFormatter.fileSafe.fileSafeString(from: Date())
         let shortID = peripheralID.uuidString.replacingOccurrences(of: "-", with: "").suffix(6).uppercased()
-        let folder = root.appendingPathComponent("\(stamp)-Sensor-\(shortID)", isDirectory: true)
+        let folder = root.appendingPathComponent("\(stamp)-\(UUID().uuidString)-Sensor-\(shortID)", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         return folder
     }
@@ -224,6 +237,9 @@ enum InkbirdHistoryExportWriter {
         else {
             return []
         }
+        if status.expectedRecordCount == 0 {
+            return []
+        }
         let records = Array(decodeITH11BPacketRecords(packets).prefix(status.expectedRecordCount))
 
         guard let anchor = ith11BHistoryAnchorDate(
@@ -246,7 +262,8 @@ enum InkbirdHistoryExportWriter {
     }
 
     static func ith11BExpectedRecordCount(from packets: [InkbirdHistoryPacket]) -> Int? {
-        for packet in packets.reversed() where packet.command == "ith11b_history_command_02" {
+        for packet in packets.reversed() where packet.command == "ith11b_history_command_02"
+            && InkbirdITH11BHistoryProtocol.isHistoryNotification(packet.characteristicUUID) {
             guard let data = Data(hexString: packet.hex),
                   let header = InkbirdITH11BHistoryProtocol.historyHeader(from: data)
             else {
@@ -267,12 +284,11 @@ enum InkbirdHistoryExportWriter {
         guard let expectedRecordCount = ith11BExpectedRecordCount(from: packets) else {
             return nil
         }
-        let blocks = ith11BHistoryBlocks(packets)
-        return InkbirdITH11BHistoryProtocol.historyBlockStatus(
-            expectedRecordCount: expectedRecordCount,
-            blocks: blocks,
-            decodedRecordCount: decodeITH11BPacketRecords(packets).count
-        )
+        var accumulator = InkbirdITH11BHistoryProtocol.BlockAccumulator(expectedRecordCount: expectedRecordCount)
+        for block in ith11BHistoryBlocks(packets) {
+            accumulator.accept(block)
+        }
+        return accumulator.status
     }
 
     private static func ith11BHistoryAnchorDate(
@@ -309,7 +325,7 @@ enum InkbirdHistoryExportWriter {
                 continue
             }
 
-            return calendar.date(from: DateComponents(
+            let components = DateComponents(
                 timeZone: calendar.timeZone,
                 year: header.year,
                 month: header.month,
@@ -317,57 +333,45 @@ enum InkbirdHistoryExportWriter {
                 hour: header.hour,
                 minute: header.minute,
                 second: 0
-            ))
+            )
+            guard let date = calendar.date(from: components),
+                  calendar.component(.day, from: date) == header.day,
+                  calendar.component(.month, from: date) == header.month,
+                  calendar.component(.year, from: date) == header.year
+            else {
+                continue
+            }
+            return date
         }
 
         return nil
     }
 
     private static func decodeITH11BPacketRecords(_ packets: [InkbirdHistoryPacket]) -> [(temperatureCelsius: Double, humidityPercent: Double)] {
-        ith11BHistoryBlocks(packets).flatMap { decodeITH11BPayload($0.payload) }
+        guard let count = ith11BExpectedRecordCount(from: packets) else { return [] }
+        return ith11BHistoryBlocks(packets).flatMap {
+            InkbirdITH11BHistoryProtocol.samples(in: $0, expectedRecordCount: count) ?? []
+        }.map { ($0.temperatureCelsius, $0.humidityPercent) }
     }
 
     private static func ith11BHistoryBlocks(
         _ packets: [InkbirdHistoryPacket]
     ) -> [InkbirdITH11BHistoryProtocol.HistoryBlock] {
-        var blocksBySequence: [Int: InkbirdITH11BHistoryProtocol.HistoryBlock] = [:]
+        guard let count = ith11BExpectedRecordCount(from: packets) else { return [] }
+        var accumulator = InkbirdITH11BHistoryProtocol.BlockAccumulator(expectedRecordCount: count)
         for packet in packets where packet.command == "ith11b_history_command_01"
-            || packet.command == "ith11b_history_command_03" {
-            guard let data = Data(hexString: packet.hex),
+            || packet.command == "ith11b_history_command_03"
+            || packet.command == "ith11b_history_data"
+            || packet.command.hasPrefix("ith11b_missing_blocks") {
+            guard InkbirdITH11BHistoryProtocol.isHistoryNotification(packet.characteristicUUID),
+                  let data = Data(hexString: packet.hex),
                   let block = InkbirdITH11BHistoryProtocol.historyBlock(from: data)
             else {
                 continue
             }
-            blocksBySequence[block.sequence] = block
+            accumulator.accept(block)
         }
-        return blocksBySequence.values.sorted { $0.sequence < $1.sequence }
-    }
-
-    private static func decodeITH11BPayload(_ data: Data) -> [(temperatureCelsius: Double, humidityPercent: Double)] {
-        guard data.count >= 4 else {
-            return []
-        }
-
-        var records: [(temperatureCelsius: Double, humidityPercent: Double)] = []
-        var index = 0
-        while index + 3 < data.count {
-            let temperatureRaw = Int16(bitPattern: UInt16(data[index]) | (UInt16(data[index + 1]) << 8))
-            let humidityRaw = UInt16(data[index + 2]) | (UInt16(data[index + 3]) << 8)
-
-            if temperatureRaw == 0, humidityRaw == 0 {
-                break
-            }
-
-            let temperature = Double(temperatureRaw) / 10.0
-            let humidity = Double(humidityRaw) / 10.0
-            guard (-60.0...100.0).contains(temperature), (0.0...100.0).contains(humidity) else {
-                break
-            }
-
-            records.append((temperature, humidity))
-            index += 4
-        }
-        return records
+        return accumulator.blocksBySequence.values.sorted { $0.sequence < $1.sequence }
     }
 
     private static func decodeSignedSeries(
@@ -442,19 +446,39 @@ enum InkbirdHistoryExportWriter {
     }
 }
 
-struct InkbirdHistoryChartGenerationResult {
+struct InkbirdHistoryChartGenerationResult: Sendable {
     let dayStart: Date
     let pngURL: URL
     let recordCount: Int
     let csvURLs: [URL]
+    let sensor: InkbirdHistoryChartSensor
 }
 
-enum InkbirdHistoryChartGenerationError: LocalizedError {
+struct InkbirdHistoryChartSensor: Hashable, Sendable {
+    let id: String
+
+    var label: String {
+        if id.hasPrefix("legacy:") {
+            return "Sensor \(id.dropFirst(7)) (legacy ID)"
+        }
+        return "Sensor \(id)"
+    }
+
+    var fileComponent: String {
+        id.replacingOccurrences(of: "legacy:", with: "legacy-")
+    }
+}
+
+enum InkbirdHistoryChartGenerationError: LocalizedError, Equatable {
     case noHistoryFolder(URL)
     case noHistoryCSVs(URL)
     case noRecordsForDay(Date)
     case noChartableRecords(Date)
     case invalidCSV(URL, line: Int)
+    case sensorSelectionRequired
+    case sensorNotFound(String)
+    case unknownSensorIdentity(URL)
+    case ambiguousSensorIdentity(String)
 
     var errorDescription: String? {
         switch self {
@@ -483,6 +507,23 @@ enum InkbirdHistoryChartGenerationError: LocalizedError {
                 en: "Invalid CSV format at \(url.path):\(line).",
                 ja: "CSV形式が不正です: \(url.path):\(line)"
             )
+        case .sensorSelectionRequired:
+            AppText.localized(
+                en: "Multiple sensors have saved histories. Select one sensor to generate its graph.",
+                ja: "複数のセンサーの履歴があります。グラフにするセンサーを選択してください。"
+            )
+        case let .sensorNotFound(id):
+            AppText.localized(en: "No saved history for sensor \(id).", ja: "センサー \(id) の保存済み履歴がありません。")
+        case let .unknownSensorIdentity(url):
+            AppText.localized(
+                en: "Cannot identify the sensor for \(url.path). Keep its original raw-history.json or legacy Sensor-XXXXXX folder name.",
+                ja: "\(url.path) のセンサーを識別できません。元のraw-history.jsonまたは旧形式のSensor-XXXXXXフォルダ名が必要です。"
+            )
+        case let .ambiguousSensorIdentity(suffix):
+            AppText.localized(
+                en: "Legacy sensor ID \(suffix) matches multiple sensors. Restore the original raw-history.json before generating a graph.",
+                ja: "旧形式のセンサーID \(suffix) が複数のセンサーに一致します。元のraw-history.jsonを復元してください。"
+            )
         }
     }
 
@@ -503,12 +544,12 @@ enum InkbirdHistoryChartRenderer {
     private static let marginTop: CGFloat = 160
     private static let marginBottom: CGFloat = 105
 
-    struct TimeDomain: Equatable {
+    struct TimeDomain: Equatable, Sendable {
         let start: Date
         let end: Date
     }
 
-    struct ValueRange: Equatable {
+    struct ValueRange: Equatable, Sendable {
         let lower: Double
         let upper: Double
     }
@@ -517,18 +558,25 @@ enum InkbirdHistoryChartRenderer {
         containing date: Date,
         historyRoot: URL,
         outputFolder: URL? = nil,
-        timeZone: TimeZone = .autoupdatingCurrent
+        timeZone: TimeZone = .autoupdatingCurrent,
+        sensorID: String? = nil
     ) throws -> InkbirdHistoryChartGenerationResult {
         let fileManager = FileManager.default
-        var isDirectory: ObjCBool = false
-        guard fileManager.fileExists(atPath: historyRoot.path, isDirectory: &isDirectory), isDirectory.boolValue else {
-            throw InkbirdHistoryChartGenerationError.noHistoryFolder(historyRoot)
+        let sources = try historySources(in: historyRoot)
+        let sensors = Set(sources.map(\.sensor))
+        let sensor: InkbirdHistoryChartSensor
+        if let sensorID {
+            guard let selected = sensors.first(where: { $0.id == sensorID }) else {
+                throw InkbirdHistoryChartGenerationError.sensorNotFound(sensorID)
+            }
+            sensor = selected
+        } else {
+            guard sensors.count == 1, let onlySensor = sensors.first else {
+                throw InkbirdHistoryChartGenerationError.sensorSelectionRequired
+            }
+            sensor = onlySensor
         }
-
-        let csvURLs = try historyCSVURLs(in: historyRoot)
-        guard !csvURLs.isEmpty else {
-            throw InkbirdHistoryChartGenerationError.noHistoryCSVs(historyRoot)
-        }
+        let csvURLs = sources.filter { $0.sensor == sensor }.map(\.csvURL)
 
         let calendar = calendar(for: timeZone)
         let dayStart = calendar.startOfDay(for: date)
@@ -559,20 +607,86 @@ enum InkbirdHistoryChartRenderer {
         guard !records.isEmpty else {
             throw InkbirdHistoryChartGenerationError.noRecordsForDay(dayStart)
         }
-        guard let pngData = try pngData(for: records, timeZone: timeZone, timeDomain: dayTimeDomain(startingAt: dayStart, timeZone: timeZone)) else {
+        guard let pngData = try pngData(
+            for: records,
+            timeZone: timeZone,
+            timeDomain: dayTimeDomain(startingAt: dayStart, timeZone: timeZone),
+            sensorLabel: sensor.label
+        ) else {
             throw InkbirdHistoryChartGenerationError.noChartableRecords(dayStart)
         }
 
         let destinationFolder = outputFolder ?? historyRoot
         try fileManager.createDirectory(at: destinationFolder, withIntermediateDirectories: true)
-        let pngURL = destinationFolder.appendingPathComponent(fileName(forDayStartingAt: dayStart, timeZone: timeZone))
+        let name = fileName(forDayStartingAt: dayStart, timeZone: timeZone)
+        let sensorName = String(name.dropLast(4)) + "_\(sensor.fileComponent).png"
+        let pngURL = destinationFolder.appendingPathComponent(sensorID == nil && sensors.count == 1 ? name : sensorName)
         try pngData.write(to: pngURL, options: .atomic)
         return InkbirdHistoryChartGenerationResult(
             dayStart: dayStart,
             pngURL: pngURL,
             recordCount: records.count,
-            csvURLs: contributingCSVURLs
+            csvURLs: contributingCSVURLs,
+            sensor: sensor
         )
+    }
+
+    static func availableSensors(in root: URL) throws -> [InkbirdHistoryChartSensor] {
+        Array(Set(try historySources(in: root).map(\.sensor))).sorted { $0.id < $1.id }
+    }
+
+    private struct HistorySource: Sendable {
+        let csvURL: URL
+        let sensor: InkbirdHistoryChartSensor
+    }
+
+    private struct RawSensorIdentity: Decodable {
+        let peripheralID: String?
+    }
+
+    private static func historySources(in root: URL) throws -> [HistorySource] {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw InkbirdHistoryChartGenerationError.noHistoryFolder(root)
+        }
+        let csvURLs = try historyCSVURLs(in: root)
+        guard !csvURLs.isEmpty else { throw InkbirdHistoryChartGenerationError.noHistoryCSVs(root) }
+        var identified: [HistorySource] = []
+        var legacy: [(csvURL: URL, suffix: String)] = []
+        for csvURL in csvURLs {
+            let folder = csvURL.deletingLastPathComponent()
+            let rawURL = folder.appendingPathComponent("raw-history.json")
+            if FileManager.default.fileExists(atPath: rawURL.path),
+               let rawID = try JSONDecoder().decode(RawSensorIdentity.self, from: Data(contentsOf: rawURL)).peripheralID {
+                guard let uuid = UUID(uuidString: rawID) else {
+                    throw InkbirdHistoryChartGenerationError.unknownSensorIdentity(rawURL)
+                }
+                identified.append(HistorySource(csvURL: csvURL, sensor: InkbirdHistoryChartSensor(id: uuid.uuidString)))
+            } else if let suffix = legacySensorSuffix(in: folder.lastPathComponent) {
+                legacy.append((csvURL, suffix))
+            } else {
+                throw InkbirdHistoryChartGenerationError.unknownSensorIdentity(csvURL)
+            }
+        }
+        let knownSensors = Set(identified.map(\.sensor))
+        for source in legacy {
+            let matches = knownSensors.filter {
+                $0.id.replacingOccurrences(of: "-", with: "").hasSuffix(source.suffix)
+            }
+            guard matches.count <= 1 else {
+                throw InkbirdHistoryChartGenerationError.ambiguousSensorIdentity(source.suffix)
+            }
+            let sensor = matches.first ?? InkbirdHistoryChartSensor(id: "legacy:\(source.suffix)")
+            identified.append(HistorySource(csvURL: source.csvURL, sensor: sensor))
+        }
+        return identified.sorted { $0.csvURL.path < $1.csvURL.path }
+    }
+
+    static func legacySensorSuffix(in folderName: String) -> String? {
+        guard let range = folderName.range(of: "-Sensor-", options: .backwards) else { return nil }
+        let suffix = folderName[range.upperBound...]
+        guard suffix.count == 6, suffix.allSatisfy({ $0.isASCII && $0.isHexDigit }) else { return nil }
+        return suffix.uppercased()
     }
 
     static func historyCSVURLs(in root: URL) throws -> [URL] {
@@ -683,7 +797,8 @@ enum InkbirdHistoryChartRenderer {
     static func pngData(
         for records: [InkbirdHistoryRecord],
         timeZone: TimeZone = .autoupdatingCurrent,
-        timeDomain: TimeDomain? = nil
+        timeDomain: TimeDomain? = nil,
+        sensorLabel: String? = nil
     ) throws -> Data? {
         let points = records.compactMap { record -> ChartPoint? in
             guard let timestamp = record.timestamp else {
@@ -727,7 +842,8 @@ enum InkbirdHistoryChartRenderer {
             timeDomain: timeDomain,
             timeZone: timeZone,
             temperatureRange: temperatureRange,
-            humidityRange: humidityRange
+            humidityRange: humidityRange,
+            sensorLabel: sensorLabel
         )
 
         guard let image = context.makeImage(),
@@ -785,7 +901,8 @@ enum InkbirdHistoryChartRenderer {
         timeDomain: TimeDomain,
         timeZone: TimeZone,
         temperatureRange: ValueRange,
-        humidityRange: ValueRange
+        humidityRange: ValueRange,
+        sensorLabel: String?
     ) {
         let plotRect = CGRect(
             x: marginLeft,
@@ -800,7 +917,8 @@ enum InkbirdHistoryChartRenderer {
         let temperatureColor = CGColor(red: 0.85, green: 0.29, blue: 0.34, alpha: 1)
         let humidityColor = CGColor(red: 0.12, green: 0.48, blue: 0.72, alpha: 1)
 
-        drawText("Sensor History", in: context, at: CGPoint(x: marginLeft, y: 28), size: 28, weight: .bold, color: textColor)
+        let title = sensorLabel.map { "Sensor History — \($0)" } ?? "Sensor History"
+        drawText(title, in: context, at: CGPoint(x: marginLeft, y: 28), size: 23, weight: .bold, color: textColor)
         drawText(subtitle(for: points, timeZone: timeZone), in: context, at: CGPoint(x: marginLeft, y: 66), size: 16, weight: .regular, color: mutedColor)
         drawLegend(in: context, x: marginLeft, y: 108, color: temperatureColor, label: "Temperature (°C, left axis)")
         drawLegend(in: context, x: marginLeft + 330, y: 108, color: humidityColor, label: "Humidity (%, right axis)")

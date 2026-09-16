@@ -376,68 +376,40 @@ private func historyBlockPacket(
 
 @Test func continuesMissingBlockRecoveryWhileNewBlocksArrive() {
     var tracker = InkbirdITH11BHistoryProtocol.MissingBlockRecoveryTracker()
-    let start = Date(timeIntervalSince1970: 1_000)
-
-    #expect(tracker.nextDecision(
-        status: recoveryStatus(receivedSequences: [1, 3, 11, 13]),
-        at: start
-    ) == .retry(round: 1))
-    #expect(tracker.nextDecision(
-        status: recoveryStatus(receivedSequences: [1, 2, 3, 6, 8, 11, 12, 13]),
-        at: start.addingTimeInterval(10)
-    ) == .retry(round: 2))
-    #expect(tracker.nextDecision(
-        status: recoveryStatus(receivedSequences: [1, 2, 3, 4, 6, 7, 8, 11, 12, 13, 14]),
-        at: start.addingTimeInterval(20)
-    ) == .retry(round: 3))
-    #expect(tracker.nextDecision(
-        status: recoveryStatus(receivedSequences: [1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 13, 14]),
-        at: start.addingTimeInterval(30)
-    ) == .retry(round: 4))
+    for round in 1...5 {
+        let status = recoveryStatus(receivedSequences: Array(1...round))
+        let now = Double(round - 1) * 100
+        tracker.observe(status: status, at: now)
+        #expect(tracker.nextDecision(status: status, at: now + 15) == .retry(round: round))
+    }
     #expect(tracker.nextDecision(
         status: recoveryStatus(receivedSequences: Array(1...14), decodedRecordCount: 620),
-        at: start.addingTimeInterval(40)
+        at: 500
     ) == .complete)
 }
 
-@Test func stopsMissingBlockRecoveryAfterConsecutiveNoProgressRounds() {
-    var tracker = InkbirdITH11BHistoryProtocol.MissingBlockRecoveryTracker(
-        maxConsecutiveNoProgressRounds: 3,
-        timeout: 300
-    )
-    let start = Date(timeIntervalSince1970: 1_000)
+@Test func stopsMissingBlockRecoveryAfterNoProgressDeadlineNotThreeRounds() {
+    var tracker = InkbirdITH11BHistoryProtocol.MissingBlockRecoveryTracker()
     let status = recoveryStatus(receivedSequences: [1, 2, 3, 4])
-
-    #expect(tracker.nextDecision(status: status, at: start) == .retry(round: 1))
-    #expect(tracker.nextDecision(
-        status: status,
-        at: start.addingTimeInterval(5)
-    ) == .retry(round: 2))
-    #expect(tracker.nextDecision(
-        status: status,
-        at: start.addingTimeInterval(10)
-    ) == .retry(round: 3))
-    #expect(tracker.nextDecision(
-        status: status,
-        at: start.addingTimeInterval(15)
-    ) == .stalled(retryRounds: 3, missingSequences: Array(5...14)))
+    #expect(tracker.nextDecision(status: status, at: 0) == .wait(15))
+    #expect(tracker.nextDecision(status: status, at: 15) == .retry(round: 1))
+    #expect(tracker.nextDecision(status: status, at: 30) == .wait(15))
+    #expect(tracker.nextDecision(status: status, at: 45) == .retry(round: 2))
+    #expect(tracker.nextDecision(status: status, at: 105) == .retry(round: 3))
+    #expect(tracker.nextDecision(status: status, at: 165) == .retry(round: 4))
+    #expect(tracker.nextDecision(status: status, at: 180) == .timedOut(retryRounds: 4, missingSequences: Array(5...14)))
 }
 
-@Test func timesOutMissingBlockRecoveryEvenWhenProgressContinues() {
-    var tracker = InkbirdITH11BHistoryProtocol.MissingBlockRecoveryTracker(
-        maxConsecutiveNoProgressRounds: 3,
-        timeout: 30
-    )
-    let start = Date(timeIntervalSince1970: 1_000)
-
-    #expect(tracker.nextDecision(
-        status: recoveryStatus(receivedSequences: [1, 2, 3, 4]),
-        at: start
-    ) == .retry(round: 1))
-    #expect(tracker.nextDecision(
-        status: recoveryStatus(receivedSequences: [1, 2, 3, 4, 5]),
-        at: start.addingTimeInterval(31)
-    ) == .timedOut(retryRounds: 1, missingSequences: Array(6...14)))
+@Test func resetsRecoveryDeadlineOnlyForNewBlocks() {
+    var tracker = InkbirdITH11BHistoryProtocol.MissingBlockRecoveryTracker(timeout: 30)
+    let first = recoveryStatus(receivedSequences: [1, 2, 3, 4])
+    let next = recoveryStatus(receivedSequences: [1, 2, 3, 4, 5])
+    tracker.observe(status: first, at: 0)
+    tracker.observe(status: next, at: 20)
+    #expect(tracker.nextDecision(status: next, at: 31) == .wait(4))
+    #expect(tracker.nextDecision(status: next, at: 35) == .retry(round: 1))
+    tracker.observe(status: next, at: 49)
+    #expect(tracker.nextDecision(status: next, at: 50) == .timedOut(retryRounds: 1, missingSequences: Array(6...14)))
 }
 
 @Test func sortsAndDeduplicatesRetransmittedITH11BBlocks() throws {

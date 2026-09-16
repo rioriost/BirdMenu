@@ -5,7 +5,7 @@ import Foundation
 final class StatusMenuController {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let scanner = InkbirdScanner()
-    private let menu = NSMenu()
+    private let menu = StatusMenuController.makeMenu()
     private let statusItemText = NSMenuItem(title: "\(AppText.status): \(AppText.starting)", action: nil, keyEquivalent: "")
     private let displayItem = NSMenuItem(title: "\(AppText.display): \(AppText.allSensors)", action: nil, keyEquivalent: "")
     private let deviceItem = NSMenuItem(title: "\(AppText.sensor): --", action: nil, keyEquivalent: "")
@@ -16,19 +16,29 @@ final class StatusMenuController {
     private let lastUpdateItem = NSMenuItem(title: "\(AppText.lastUpdate): --", action: nil, keyEquivalent: "")
     private let historyItem = NSMenuItem(title: "\(AppText.history): --", action: nil, keyEquivalent: "")
 
-    private var readingsByPeripheralID: [UUID: InkbirdReading] = [:]
+    private var sensorState = SensorDisplayState()
     private var selectedPeripheralID: UUID? {
-        didSet {
-            UserDefaults.standard.set(selectedPeripheralID?.uuidString, forKey: Self.selectedPeripheralDefaultsKey)
+        get { sensorState.selectedPeripheralID }
+        set {
+            sensorState.selectedPeripheralID = newValue
+            UserDefaults.standard.set(newValue?.uuidString, forKey: Self.selectedPeripheralDefaultsKey)
         }
     }
     private var scannerStatus: BLEScannerStatus = .starting
     private var timer: Timer?
-    private var isFetchingHistory = false
+    private var historyRequest = HistoryUIRequestState()
+    private var historyProgress: HistoryFetchProgress?
+    private var isFetchingHistory: Bool { historyRequest.isFetching }
     private var historyStatus: HistoryDisplayStatus = .notFetched
     private var settingsWindowController: SettingsWindowController?
 
     private static let selectedPeripheralDefaultsKey = "selectedPeripheralID"
+
+    static func makeMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        return menu
+    }
 
     init() {
         selectedPeripheralID = UserDefaults.standard.string(forKey: Self.selectedPeripheralDefaultsKey).flatMap(UUID.init(uuidString:))
@@ -70,11 +80,7 @@ final class StatusMenuController {
                 guard let self else {
                     return
                 }
-                self.readingsByPeripheralID[reading.peripheralID] = reading
-                if let selectedPeripheralID = self.selectedPeripheralID,
-                   self.readingsByPeripheralID[selectedPeripheralID] == nil {
-                    self.selectedPeripheralID = nil
-                }
+                self.sensorState.receive(reading)
                 self.refresh()
             }
         }
@@ -95,26 +101,51 @@ final class StatusMenuController {
     }
 
     @objc private func rescan() {
+        guard !isFetchingHistory else { return }
         scanner.restart()
     }
 
     @objc private func fetchHistory() {
+        guard !isFetchingHistory, !historyRequest.pendingQuit else { return }
         guard let reading = historyTargetReading() else {
             showAlert(title: AppText.noSensorSelectedTitle, message: AppText.noSensorSelectedMessage)
             return
         }
-        isFetchingHistory = true
+        guard let requestID = historyRequest.begin() else { return }
+        historyProgress = nil
         historyStatus = .fetching
         refresh()
+        scanner.onHistoryProgress = { [weak self] progress in
+            Task { @MainActor in
+                guard let self, self.historyRequest.accepts(requestID) else { return }
+                self.historyProgress = progress
+                self.refresh()
+            }
+        }
         scanner.fetchHistory(for: reading) { [weak self] result in
             Task { @MainActor in
-                guard let self else {
+                guard let self, self.historyRequest.finish(requestID) else {
                     return
                 }
-                self.isFetchingHistory = false
+                self.scanner.onHistoryProgress = nil
+                self.historyProgress = nil
+                if let shouldTerminate = self.historyRequest.resolvePendingQuit(for: result) {
+                    NSApplication.shared.reply(toApplicationShouldTerminate: shouldTerminate)
+                    if shouldTerminate { return }
+                }
+                self.settingsWindowController?.refreshHistorySensors()
                 switch result {
                 case let .success(history):
-                    if let csvURL = history.csvURL {
+                    if HistoryUIRequestState.isEmptySuccess(history) {
+                        self.historyStatus = .noNewRecords
+                        self.showAlert(
+                            title: AppText.historyFetchCompleteTitle,
+                            message: Self.withWarnings(
+                                "\(AppText.noNewHistory)\n\nRaw: \(history.rawURL.path)",
+                                history: history
+                            )
+                        )
+                    } else if let csvURL = history.csvURL {
                         self.historyStatus = .records(history.recordCount)
                         self.showAlert(
                             title: AppText.historyFetchCompleteTitle,
@@ -183,6 +214,33 @@ final class StatusMenuController {
         NSApplication.shared.terminate(nil)
     }
 
+    func applicationShouldTerminate() -> NSApplication.TerminateReply {
+        guard isFetchingHistory else { return .terminateNow }
+        if historyRequest.pendingQuit { return .terminateLater }
+        let alert = NSAlert()
+        alert.messageText = AppText.quitDuringHistoryTitle
+        alert.informativeText = AppText.quitDuringHistoryMessage
+        alert.addButton(withTitle: AppText.cancelHistoryAndQuit)
+        alert.addButton(withTitle: AppText.keepRunning)
+        guard alert.runModal() == .alertFirstButtonReturn else { return .terminateCancel }
+        guard isFetchingHistory else { return .terminateNow }
+        let shouldCancel = historyRequest.requestCancellation(forQuit: true)
+        refresh()
+        if shouldCancel {
+            // Defer completion until AppKit has registered the terminateLater reply.
+            Task { @MainActor [weak self] in
+                self?.scanner.cancelHistory()
+            }
+        }
+        return .terminateLater
+    }
+
+    @objc private func cancelHistory() {
+        guard historyRequest.requestCancellation() else { return }
+        refresh()
+        scanner.cancelHistory()
+    }
+
     private func refresh() {
         let displayState = currentDisplayState()
         statusItem.button?.image = Self.statusImage(color: displayState.color)
@@ -195,6 +253,13 @@ final class StatusMenuController {
     }
 
     private func updateDetailItems() {
+        if historyRequest.cancellationRequested {
+            historyItem.title = "\(AppText.history): \(AppText.cancellingHistory)"
+        } else if let historyProgress, isFetchingHistory {
+            historyItem.title = "\(AppText.history): \(AppText.historyProgress(historyProgress))"
+        } else {
+            historyItem.title = historyStatus.menuTitle
+        }
         guard let snapshot = selectedSnapshot() else {
             displayItem.title = "\(AppText.display): \(selectedPeripheralID == nil ? AppText.allSensors : AppText.missingSensor)"
             deviceItem.title = "\(AppText.sensor): --"
@@ -203,7 +268,6 @@ final class StatusMenuController {
             batteryItem.title = "\(AppText.battery): --"
             signalItem.title = "\(AppText.signal): --"
             lastUpdateItem.title = "\(AppText.lastUpdate): --"
-            historyItem.title = historyStatus.menuTitle
             return
         }
 
@@ -213,14 +277,17 @@ final class StatusMenuController {
         humidityItem.title = "\(AppText.humidity): \(Self.formatHumidity(snapshot.humidityPercent))"
         batteryItem.title = snapshot.batteryPercent.map { "\(AppText.battery): \($0)%" } ?? "\(AppText.battery): --"
         signalItem.title = snapshot.rssi.map { "\(AppText.signal): \($0) dBm" } ?? "\(AppText.signal): --"
-        lastUpdateItem.title = "\(AppText.lastUpdate): \(Self.relativeTime(since: snapshot.date))"
-        historyItem.title = historyStatus.menuTitle
+        lastUpdateItem.title = "\(snapshot.isAggregate ? AppText.oldestUpdate : AppText.lastUpdate): \(Self.relativeTime(since: snapshot.date))"
     }
 
     private func rebuildMenu() {
         menu.removeAllItems()
+        for item in [statusItemText, displayItem, deviceItem, temperatureItem, humidityItem, batteryItem, signalItem, lastUpdateItem, historyItem] {
+            item.isEnabled = false
+        }
         menu.addItem(statusItemText)
         menu.addItem(NSMenuItem.separator())
+        menu.addItem(displayItem)
         menu.addItem(deviceItem)
         menu.addItem(temperatureItem)
         menu.addItem(humidityItem)
@@ -234,6 +301,16 @@ final class StatusMenuController {
         allDevicesItem.state = selectedPeripheralID == nil ? .on : .off
         menu.addItem(allDevicesItem)
 
+        if let selectedPeripheralID, sensorState.readingsByPeripheralID[selectedPeripheralID] == nil {
+            let missingItem = NSMenuItem(
+                title: "\(AppText.sensor) \(Self.shortID(selectedPeripheralID)) — \(AppText.selectedSensorMissing)",
+                action: nil,
+                keyEquivalent: ""
+            )
+            missingItem.state = .on
+            missingItem.isEnabled = false
+            menu.addItem(missingItem)
+        }
         for reading in sortedReadings() {
             let item = NSMenuItem(title: deviceSelectionTitle(for: reading), action: #selector(selectDevice(_:)), keyEquivalent: "")
             item.target = self
@@ -245,14 +322,22 @@ final class StatusMenuController {
         menu.addItem(NSMenuItem.separator())
         let rescanItem = NSMenuItem(title: AppText.rescan, action: #selector(rescan), keyEquivalent: "")
         rescanItem.target = self
+        rescanItem.isEnabled = !isFetchingHistory
         menu.addItem(rescanItem)
 
         menu.addItem(NSMenuItem.separator())
+        menu.addItem(historyItem)
         let fetchHistoryItem = NSMenuItem(title: AppText.fetchSensorHistory, action: #selector(fetchHistory), keyEquivalent: "")
         fetchHistoryItem.target = self
         fetchHistoryItem.isEnabled = !isFetchingHistory && historyTargetReading() != nil
         menu.addItem(fetchHistoryItem)
 
+        if isFetchingHistory {
+            let cancelItem = NSMenuItem(title: AppText.cancelHistory, action: #selector(cancelHistory), keyEquivalent: "")
+            cancelItem.target = self
+            cancelItem.isEnabled = !historyRequest.cancellationRequested
+            menu.addItem(cancelItem)
+        }
         let openHistoryFolderItem = NSMenuItem(title: AppText.openHistoryFolder, action: #selector(openLatestHistoryFolder), keyEquivalent: "")
         openHistoryFolderItem.target = self
         menu.addItem(openHistoryFolderItem)
@@ -285,60 +370,28 @@ final class StatusMenuController {
             return ("--.-\(TemperatureUnit.current == .celsius ? "°C" : "°F") --%", .systemOrange, status, "BirdMenu: \(status)")
         }
 
-        let age = Date().timeIntervalSince(snapshot.date)
         let text = "\(Self.formatTemperature(snapshot.temperatureCelsius)) \(Self.formatHumidity(snapshot.humidityPercent))"
-        if age <= 120 {
+        let updateLabel = snapshot.isAggregate ? AppText.oldestUpdate : AppText.lastUpdate
+        switch snapshot.freshness(at: Date()) {
+        case .fresh:
             return (text, .systemGreen, AppText.receivingBLE, "BirdMenu: \(snapshot.label)")
+        case .stale:
+            return (text, .systemOrange, snapshot.isAggregate ? AppText.someSensorsStaleBLE : AppText.staleBLE, "BirdMenu: \(updateLabel) \(Self.relativeTime(since: snapshot.date))")
+        case .missing:
+            return (text, .systemRed, snapshot.isAggregate ? AppText.someSensorsNoRecentBLE : AppText.noRecentBLE, "BirdMenu: \(updateLabel) \(Self.relativeTime(since: snapshot.date))")
         }
-        if age <= 600 {
-            return (text, .systemOrange, AppText.staleBLE, "BirdMenu: \(AppText.lastUpdate) \(Self.relativeTime(since: snapshot.date))")
-        }
-        return (text, .systemRed, AppText.noRecentBLE, "BirdMenu: \(AppText.lastUpdate) \(Self.relativeTime(since: snapshot.date))")
     }
 
     private func selectedSnapshot() -> DisplaySnapshot? {
-        if let selectedPeripheralID {
-            guard let reading = readingsByPeripheralID[selectedPeripheralID] else {
-                return nil
-            }
-            return DisplaySnapshot(reading: reading, label: deviceLabel(for: reading))
-        }
-
-        let readings = sortedReadings()
-        guard !readings.isEmpty else {
-            return nil
-        }
-        if readings.count == 1, let reading = readings.first {
-            return DisplaySnapshot(reading: reading, label: deviceLabel(for: reading))
-        }
-
-        let temperatures = readings.map(\.temperatureCelsius)
-        let humidities = readings.compactMap(\.humidityPercent)
-        let freshest = readings.max { $0.date < $1.date }!
-        let averageTemperature = temperatures.reduce(0, +) / Double(temperatures.count)
-        let averageHumidity = humidities.isEmpty ? nil : humidities.reduce(0, +) / Double(humidities.count)
-
-        return DisplaySnapshot(
-            label: "\(AppText.allSensors) (\(readings.count))",
-            temperatureCelsius: averageTemperature,
-            humidityPercent: averageHumidity,
-            batteryPercent: nil,
-            rssi: nil,
-            date: freshest.date,
-            isAggregate: true
-        )
+        sensorState.snapshot
     }
 
     private func historyTargetReading() -> InkbirdReading? {
-        if let selectedPeripheralID {
-            return readingsByPeripheralID[selectedPeripheralID]
-        }
-        let readings = sortedReadings()
-        return readings.count == 1 ? readings.first : nil
+        sensorState.historyTargetReading
     }
 
     private func sortedReadings() -> [InkbirdReading] {
-        readingsByPeripheralID.values.sorted {
+        sensorState.readingsByPeripheralID.values.sorted {
             let left = deviceLabel(for: $0)
             let right = deviceLabel(for: $1)
             if left == right {
@@ -416,16 +469,20 @@ final class StatusMenuController {
 
     private static func historyCompleteMessage(history: InkbirdHistoryResult, csvURL: URL) -> String {
         if AppText.isJapanese {
-            return "\(history.recordCount)件の履歴レコードと\(history.packetCount)件の生パケットを保存しました。\n\nCSV: \(csvURL.path)\nRaw: \(history.rawURL.path)"
+            return withWarnings("\(history.recordCount)件の履歴レコードと\(history.packetCount)件の生パケットを保存しました。\n\nCSV: \(csvURL.path)\nRaw: \(history.rawURL.path)", history: history)
         }
-        return "Saved \(history.recordCount) decoded records and \(history.packetCount) raw packets.\n\nCSV: \(csvURL.path)\nRaw: \(history.rawURL.path)"
+        return withWarnings("Saved \(history.recordCount) decoded records and \(history.packetCount) raw packets.\n\nCSV: \(csvURL.path)\nRaw: \(history.rawURL.path)", history: history)
     }
 
     private static func historyRawDumpMessage(history: InkbirdHistoryResult) -> String {
         if AppText.isJapanese {
-            return "\(history.packetCount)件の生パケットを保存しましたが、CSVとして確実にデコードできませんでした。\n\nRaw: \(history.rawURL.path)"
+            return withWarnings("\(history.packetCount)件の生パケットを保存しましたが、CSVとして確実にデコードできませんでした。\n\nRaw: \(history.rawURL.path)", history: history)
         }
-        return "Saved \(history.packetCount) raw packets, but could not confidently decode them into CSV yet.\n\nRaw: \(history.rawURL.path)"
+        return withWarnings("Saved \(history.packetCount) raw packets, but could not confidently decode them into CSV yet.\n\nRaw: \(history.rawURL.path)", history: history)
+    }
+
+    private static func withWarnings(_ message: String, history: InkbirdHistoryResult) -> String {
+        history.warnings.isEmpty ? message : message + "\n\n" + history.warnings.joined(separator: "\n")
     }
 
     private func showAlert(title: String, message: String) {
@@ -443,6 +500,7 @@ private enum HistoryDisplayStatus {
     case fetching
     case records(Int)
     case rawOnly
+    case noNewRecords
     case failed
 
     var menuTitle: String {
@@ -455,13 +513,111 @@ private enum HistoryDisplayStatus {
             AppText.isJapanese ? "\(AppText.history): \(count)件" : "\(AppText.history): \(count) records"
         case .rawOnly:
             "\(AppText.history): \(AppText.rawOnly)"
+        case .noNewRecords:
+            "\(AppText.history): \(AppText.noNewHistory)"
         case .failed:
             "\(AppText.history): \(AppText.failed)"
         }
     }
 }
 
-private struct DisplaySnapshot {
+struct HistoryUIRequestState {
+    private(set) var requestID: UUID?
+    private(set) var cancellationRequested = false
+    private(set) var pendingQuit = false
+
+    var isFetching: Bool { requestID != nil }
+
+    mutating func begin() -> UUID? {
+        guard !isFetching, !pendingQuit else { return nil }
+        let id = UUID()
+        requestID = id
+        return id
+    }
+
+    func accepts(_ id: UUID) -> Bool { requestID == id }
+
+    mutating func finish(_ id: UUID) -> Bool {
+        guard accepts(id) else { return false }
+        requestID = nil
+        cancellationRequested = false
+        return true
+    }
+
+    mutating func requestCancellation(forQuit: Bool = false) -> Bool {
+        guard isFetching else { return false }
+        pendingQuit = pendingQuit || forQuit
+        guard !cancellationRequested else { return false }
+        cancellationRequested = true
+        return true
+    }
+
+    mutating func resolvePendingQuit(for result: Result<InkbirdHistoryResult, Error>) -> Bool? {
+        guard pendingQuit, !isFetching else { return nil }
+        switch result {
+        case .success:
+            return true
+        case let .failure(error):
+            if let historyError = error as? HistoryFetchError {
+                switch historyError {
+                case .cancelled, .partialDumpSaved:
+                    return true
+                default:
+                    break
+                }
+            }
+            pendingQuit = false
+            return false
+        }
+    }
+
+    static func isEmptySuccess(_ result: InkbirdHistoryResult) -> Bool {
+        result.isComplete && result.recordCount == 0
+    }
+}
+
+struct SensorDisplayState {
+    var selectedPeripheralID: UUID?
+    private(set) var readingsByPeripheralID: [UUID: InkbirdReading] = [:]
+
+    mutating func receive(_ reading: InkbirdReading) {
+        readingsByPeripheralID[reading.peripheralID] = reading
+    }
+
+    var historyTargetReading: InkbirdReading? {
+        if let selectedPeripheralID { return readingsByPeripheralID[selectedPeripheralID] }
+        return readingsByPeripheralID.count == 1 ? readingsByPeripheralID.values.first : nil
+    }
+
+    var snapshot: DisplaySnapshot? {
+        let readings: [InkbirdReading]
+        if let selectedPeripheralID {
+            guard let reading = readingsByPeripheralID[selectedPeripheralID] else { return nil }
+            readings = [reading]
+        } else {
+            readings = Array(readingsByPeripheralID.values)
+        }
+        guard let oldest = readings.min(by: { $0.date < $1.date }) else { return nil }
+        if readings.count == 1 {
+            let shortID = oldest.peripheralID.uuidString.replacingOccurrences(of: "-", with: "").suffix(4)
+            return DisplaySnapshot(reading: oldest, label: "\(AppText.sensor) \(shortID)")
+        }
+        let humidities = readings.compactMap(\.humidityPercent)
+        return DisplaySnapshot(
+            label: "\(AppText.allSensors) (\(readings.count))",
+            temperatureCelsius: readings.map(\.temperatureCelsius).reduce(0, +) / Double(readings.count),
+            humidityPercent: humidities.isEmpty ? nil : humidities.reduce(0, +) / Double(humidities.count),
+            batteryPercent: nil,
+            rssi: nil,
+            date: oldest.date,
+            isAggregate: true
+        )
+    }
+}
+
+struct DisplaySnapshot {
+    enum Freshness { case fresh, stale, missing }
+
     let label: String
     let temperatureCelsius: Double
     let humidityPercent: Double?
@@ -469,6 +625,13 @@ private struct DisplaySnapshot {
     let rssi: Int?
     let date: Date
     let isAggregate: Bool
+
+    func freshness(at now: Date) -> Freshness {
+        let age = now.timeIntervalSince(date)
+        if age <= 120 { return .fresh }
+        if age <= 600 { return .stale }
+        return .missing
+    }
 
     init(reading: InkbirdReading, label: String) {
         self.label = label

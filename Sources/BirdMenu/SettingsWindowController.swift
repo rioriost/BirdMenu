@@ -11,11 +11,18 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let debugLoggingCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let historyChartDateLabel = NSTextField(labelWithString: "")
     private let historyChartDatePicker = NSDatePicker()
+    private let historyChartSensorLabel = NSTextField(labelWithString: "")
+    private let historyChartSensorPicker = NSPopUpButton()
+    private let historyChartStatusLabel = NSTextField(wrappingLabelWithString: "")
     private let generateHistoryChartButton = NSButton(title: "", target: nil, action: nil)
+    private var chartSensors: [InkbirdHistoryChartSensor] = []
+    private var chartTask: Task<Void, Never>?
+    private var isGeneratingChart = false
+    private var isLoadingSensors = false
 
     init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 440, height: 238),
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: 330),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -37,6 +44,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         window?.center()
         window?.makeKeyAndOrderFront(nil)
         NSApplication.shared.activate(ignoringOtherApps: true)
+        refreshHistorySensors()
     }
 
     func reload() {
@@ -50,10 +58,14 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         debugLoggingCheckbox.title = AppText.debugLogging
         debugLoggingCheckbox.state = BirdMenuLog.isDebugLoggingEnabled ? .on : .off
         historyChartDateLabel.stringValue = AppText.historyChartDate
-        generateHistoryChartButton.title = AppText.generateHistoryChart
+        historyChartSensorLabel.stringValue = AppText.historyChartSensor
+        historyChartSensorPicker.item(at: 0)?.title = AppText.selectHistorySensor
+        generateHistoryChartButton.title = isGeneratingChart ? AppText.generatingHistoryChart : AppText.generateHistoryChart
     }
 
     func windowWillClose(_ notification: Notification) {
+        chartTask?.cancel()
+        chartTask = nil
         onClose?()
     }
 
@@ -80,6 +92,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
         generateHistoryChartButton.target = self
         generateHistoryChartButton.action = #selector(generateHistoryChart)
+        generateHistoryChartButton.isEnabled = false
+        historyChartSensorPicker.target = self
+        historyChartSensorPicker.action = #selector(changeHistorySensor)
+        historyChartSensorPicker.addItem(withTitle: AppText.selectHistorySensor)
+        historyChartStatusLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        historyChartStatusLabel.textColor = .secondaryLabelColor
 
         let unitRow = NSStackView(views: [temperatureUnitLabel, temperatureUnitControl])
         unitRow.orientation = .horizontal
@@ -93,7 +111,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         historyChartRow.distribution = .gravityAreas
         historyChartRow.spacing = 12
 
-        let stack = NSStackView(views: [launchAtLoginCheckbox, unitRow, debugLoggingCheckbox, historyChartRow])
+        let sensorRow = NSStackView(views: [historyChartSensorLabel, historyChartSensorPicker])
+        sensorRow.orientation = .horizontal
+        sensorRow.alignment = .centerY
+        sensorRow.spacing = 12
+
+        let stack = NSStackView(views: [launchAtLoginCheckbox, unitRow, debugLoggingCheckbox, sensorRow, historyChartRow, historyChartStatusLabel])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 18
@@ -103,7 +126,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 24),
             stack.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -24),
-            stack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 26)
+            stack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 26),
+            historyChartSensorPicker.widthAnchor.constraint(equalToConstant: 390),
+            historyChartStatusLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 552)
         ])
     }
 
@@ -133,32 +158,112 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         alert.informativeText = message
         alert.alertStyle = style
         alert.addButton(withTitle: AppText.ok)
-        alert.beginSheetModal(for: window!)
+        guard let window else { return }
+        alert.beginSheetModal(for: window)
     }
 
     @objc private func generateHistoryChart() {
-        do {
-            let result = try InkbirdHistoryChartRenderer.writePNGForLocalDay(
-                containing: historyChartDatePicker.dateValue,
-                historyRoot: InkbirdHistoryExportWriter.historyRootFolderURL()
-            )
-            showAlert(
-                title: AppText.historyChartGeneratedTitle,
-                message: Self.historyChartGeneratedMessage(result),
-                style: .informational
-            )
-        } catch {
-            showAlert(
-                title: AppText.historyChartGenerationFailedTitle,
-                message: error.localizedDescription
-            )
+        guard !isGeneratingChart, !isLoadingSensors, let sensorID = selectedChartSensorID else { return }
+        let date = historyChartDatePicker.dateValue
+        let root = InkbirdHistoryExportWriter.historyRootFolderURL()
+        let timeZone = TimeZone.current
+        isGeneratingChart = true
+        updateChartControls()
+        historyChartStatusLabel.stringValue = AppText.generatingHistoryChart
+        chartTask = Task { [weak self] in
+            do {
+                let result = try await Task.detached(priority: .userInitiated) {
+                    try InkbirdHistoryChartRenderer.writePNGForLocalDay(
+                        containing: date,
+                        historyRoot: root,
+                        timeZone: timeZone,
+                        sensorID: sensorID
+                    )
+                }.value
+                guard let self, !Task.isCancelled else { return }
+                self.isGeneratingChart = false
+                self.updateChartControls()
+                self.historyChartStatusLabel.stringValue = result.pngURL.lastPathComponent
+                self.showAlert(
+                    title: AppText.historyChartGeneratedTitle,
+                    message: Self.historyChartGeneratedMessage(result),
+                    style: .informational
+                )
+            } catch {
+                guard let self, !Task.isCancelled else { return }
+                self.isGeneratingChart = false
+                self.updateChartControls()
+                self.historyChartStatusLabel.stringValue = error.localizedDescription
+                self.showAlert(title: AppText.historyChartGenerationFailedTitle, message: error.localizedDescription)
+            }
         }
+    }
+
+    private var selectedChartSensorID: String? {
+        historyChartSensorPicker.selectedItem?.representedObject as? String
+    }
+
+    @objc private func changeHistorySensor() {
+        updateChartControls()
+    }
+
+    private func updateChartControls() {
+        historyChartSensorPicker.isEnabled = !isGeneratingChart && !isLoadingSensors && !chartSensors.isEmpty
+        historyChartDatePicker.isEnabled = !isGeneratingChart
+        generateHistoryChartButton.isEnabled = !isGeneratingChart && !isLoadingSensors && selectedChartSensorID != nil
+        generateHistoryChartButton.title = isGeneratingChart ? AppText.generatingHistoryChart : AppText.generateHistoryChart
+    }
+
+    func refreshHistorySensors() {
+        guard !isGeneratingChart else { return }
+        chartTask?.cancel()
+        isLoadingSensors = true
+        let previousID = selectedChartSensorID
+        let root = InkbirdHistoryExportWriter.historyRootFolderURL()
+        historyChartSensorPicker.isEnabled = false
+        generateHistoryChartButton.isEnabled = false
+        historyChartStatusLabel.stringValue = AppText.loadingHistorySensors
+        chartTask = Task { [weak self] in
+            do {
+                let sensors = try await Task.detached(priority: .userInitiated) {
+                    try InkbirdHistoryChartRenderer.availableSensors(in: root)
+                }.value
+                guard let self, !Task.isCancelled else { return }
+                self.isLoadingSensors = false
+                self.chartSensors = sensors
+                self.historyChartSensorPicker.removeAllItems()
+                self.historyChartSensorPicker.addItem(withTitle: AppText.selectHistorySensor)
+                for sensor in sensors {
+                    self.historyChartSensorPicker.addItem(withTitle: sensor.label)
+                    self.historyChartSensorPicker.lastItem?.representedObject = sensor.id
+                }
+                let selection = Self.chartSensorSelection(previousID: previousID, sensors: sensors)
+                if let index = sensors.firstIndex(where: { $0.id == selection }) {
+                    self.historyChartSensorPicker.selectItem(at: index + 1)
+                }
+                self.historyChartStatusLabel.stringValue = sensors.count > 1 ? AppText.selectHistorySensor : ""
+                self.updateChartControls()
+            } catch {
+                guard let self, !Task.isCancelled else { return }
+                self.isLoadingSensors = false
+                self.chartSensors = []
+                self.historyChartSensorPicker.removeAllItems()
+                self.historyChartSensorPicker.addItem(withTitle: AppText.selectHistorySensor)
+                self.historyChartStatusLabel.stringValue = error.localizedDescription
+                self.updateChartControls()
+            }
+        }
+    }
+
+    nonisolated static func chartSensorSelection(previousID: String?, sensors: [InkbirdHistoryChartSensor]) -> String? {
+        if let previousID, sensors.contains(where: { $0.id == previousID }) { return previousID }
+        return sensors.count == 1 ? sensors.first?.id : nil
     }
 
     private static func historyChartGeneratedMessage(_ result: InkbirdHistoryChartGenerationResult) -> String {
         if AppText.isJapanese {
-            return "\(result.recordCount)件のCSVレコードからPNGを生成しました。\n\nPNG: \(result.pngURL.path)\nCSV: \(result.csvURLs.count)ファイル"
+            return "\(result.sensor.label)\n\(result.recordCount)件のCSVレコードからPNGを生成しました。\n\nPNG: \(result.pngURL.path)\nCSV: \(result.csvURLs.count)ファイル"
         }
-        return "Generated a PNG from \(result.recordCount) CSV records.\n\nPNG: \(result.pngURL.path)\nCSV: \(result.csvURLs.count) files"
+        return "\(result.sensor.label)\nGenerated a PNG from \(result.recordCount) CSV records.\n\nPNG: \(result.pngURL.path)\nCSV: \(result.csvURLs.count) files"
     }
 }

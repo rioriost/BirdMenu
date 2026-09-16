@@ -8,6 +8,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.setActivationPolicy(.accessory)
         statusMenuController = StatusMenuController()
     }
+
+    @MainActor
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        statusMenuController?.applicationShouldTerminate() ?? .terminateNow
+    }
 }
 
 let app = NSApplication.shared

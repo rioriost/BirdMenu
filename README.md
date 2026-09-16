@@ -12,21 +12,38 @@ Compatibility testing has been performed with the INKBIRD ITH-11-B sensor. BirdM
 
 ## History Fetch
 
-The menu includes `Fetch Sensor History`. It connects to the selected compatible sensor and tries the history-read command pattern observed from related BLE hygrometers:
+The menu includes `Fetch Sensor History`. It connects to the selected compatible sensor using one of two observed history protocols.
+
+For tested ITH-11-B units exposing `fff3`, `fff4`, `fff5`, `fff6`, and `fff7`, BirdMenu:
+
+- reads the recording interval from `fff5` and subscribes to `fff6`
+- sets the session clock through `fff7`, then requests metadata and history through `fff4`
+- validates and deduplicates history blocks, requesting missing or invalid blocks through `fff3` and `fff4`
+- saves the complete raw history and CSV **before** sending the completion/session-close commands
+
+For compatible devices exposing `fff8`, BirdMenu uses the history-read command pattern observed from related BLE hygrometers:
 
 - subscribe to notify characteristics on service `0000fff0-0000-1000-8000-00805f9b34fb`
 - write one-byte read commands to `0000fff8-0000-1000-8000-00805f9b34fb`
 - never write to the history-delete characteristic `0000fff9-0000-1000-8000-00805f9b34fb`
 
-Some tested sensors do not expose `fff8`; observed devices expose `fff3`, `fff4`, `fff5`, `fff6`, `fff7`, and an additional `5833ff01-9b8b-5191-6142-22a4536ef123` service. In that case BirdMenu saves a read-only GATT snapshot: it discovers all services, reads all readable characteristics, subscribes to notify characteristics, and does not write unknown history commands.
+If neither supported characteristic layout is present, BirdMenu saves a read-only GATT snapshot and reports that history retrieval is unsupported. It does not write unknown history commands. No history path writes to the history-delete characteristic `fff9`.
 
 Fetched data is saved under `~/Documents/BirdMenu Logs/`. The app always writes a raw JSON dump. If the packet layout can be decoded confidently, it also writes `history.csv`.
 
-Use Settings to generate a graph for a specific local date. BirdMenu scans the saved `history.csv` files that still exist under `~/Documents/BirdMenu Logs/`, combines records for the selected date, and writes `history_yyyymmdd.png` to the logs folder.
+The menu shows history progress and offers cancellation. ITH-11-B transfers allow a 15-second gap before requesting missing blocks, back off subsequent requests up to 60 seconds, and stop after 180 seconds without a new valid block. Duplicate or unrelated notifications do not extend that deadline. Continuous progress is not cut off by the old 120/300-second limits; a 40-minute overall safety limit remains. Connection/setup and command responses normally have a 30-second deadline, with 60 seconds allowed for the device's completion write.
+
+For recognized transient connection errors, BirdMenu saves the interrupted snapshot and makes at most two automatic reconnect attempts. Each reconnect starts a **separate, fresh history request**: block numbers from different device sessions are never merged. Cross-session resume is not assumed to be supported by the sensor.
+
+Raw checkpoints are saved during reception and on interruption. A successful empty history is shown as no new records, not a decoding error. If the complete history was saved but the final device handshake could not be confirmed, BirdMenu keeps the files and displays a warning. Quitting during a fetch waits for cancellation and the save attempt.
+
+Use Settings to select a sensor and generate a graph for a specific local date. BirdMenu scans the saved `history.csv` files that still exist under `~/Documents/BirdMenu Logs/`, combines records only for that sensor and date, and writes a sensor-specific PNG to the logs folder. Full device IDs in raw exports are preferred; ambiguous legacy sensor IDs are reported instead of silently mixing sensors. CSV loading and graph rendering run off the UI thread.
 
 For observed sensors, the companion-app command sequence appears to return records that have not yet been synced rather than the full retained memory every time. In practice this means repeated fetches may produce only the new records since the previous successful sync. Keep the raw JSON files if you need to audit or re-decode the captured BLE packets later.
 
 This feature is intentionally conservative because the offline history protocol is not publicly documented and is not implemented by `inkbird-ble`.
+
+When displaying the average of multiple sensors, freshness reflects the **oldest** included reading, so a recently received advertisement from one sensor cannot make another sensor's stale data appear current.
 
 ## Debug Logging
 

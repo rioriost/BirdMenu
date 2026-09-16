@@ -17,11 +17,13 @@ enum BluetoothUnavailableReason: Equatable {
 final class InkbirdScanner: NSObject, CBCentralManagerDelegate {
     var onStatusChange: ((BLEScannerStatus) -> Void)?
     var onReading: ((InkbirdReading) -> Void)?
+    var onHistoryProgress: ((HistoryFetchProgress) -> Void)?
 
     private var centralManager: CBCentralManager!
     private var peripheralsByID: [UUID: CBPeripheral] = [:]
     private var historyOperation: HistoryFetchOperation?
     private var stateCheckTimer: Timer?
+    private var disconnectingPeripheralIDs: Set<UUID> = []
 
     override init() {
         super.init()
@@ -35,6 +37,7 @@ final class InkbirdScanner: NSObject, CBCentralManagerDelegate {
     }
 
     func restart() {
+        guard historyOperation == nil else { return }
         guard centralManager.state == .poweredOn else {
             centralManagerDidUpdateState(centralManager)
             return
@@ -42,6 +45,10 @@ final class InkbirdScanner: NSObject, CBCentralManagerDelegate {
         BirdMenuLog.debugData("scanner.restart")
         centralManager.stopScan()
         startScan()
+    }
+
+    func cancelHistory() {
+        historyOperation?.fail(HistoryFetchError.cancelled)
     }
 
     func fetchHistory(
@@ -63,6 +70,10 @@ final class InkbirdScanner: NSObject, CBCentralManagerDelegate {
             completion(.failure(HistoryFetchError.peripheralNotFound))
             return
         }
+        guard !disconnectingPeripheralIDs.contains(peripheral.identifier) else {
+            completion(.failure(HistoryFetchError.busy))
+            return
+        }
 
         BirdMenuLog.debugData("history.fetch start device=\(reading.deviceName) id=\(reading.peripheralID.uuidString)")
         centralManager.stopScan()
@@ -71,9 +82,13 @@ final class InkbirdScanner: NSObject, CBCentralManagerDelegate {
             peripheral: peripheral,
             peripheralDelegate: self,
             latestReading: reading,
+            progress: { [weak self] progress in self?.onHistoryProgress?(progress) },
             completion: { [weak self] result in
                 self?.historyOperation = nil
-                self?.centralManager.cancelPeripheralConnection(peripheral)
+                if peripheral.state != .disconnected {
+                    self?.disconnectingPeripheralIDs.insert(peripheral.identifier)
+                    self?.centralManager.cancelPeripheralConnection(peripheral)
+                }
                 self?.startScan()
                 switch result {
                 case let .success(history):
@@ -94,15 +109,19 @@ final class InkbirdScanner: NSObject, CBCentralManagerDelegate {
             BirdMenuLog.debugData("scanner.state poweredOn")
             startScan()
         case .poweredOff:
+            historyOperation?.fail(HistoryFetchError.bluetoothUnavailable)
             BirdMenuLog.debugData("scanner.state poweredOff")
             onStatusChange?(.bluetoothUnavailable(.poweredOff))
         case .unauthorized:
+            historyOperation?.fail(HistoryFetchError.bluetoothUnavailable)
             BirdMenuLog.debugData("scanner.state unauthorized")
             onStatusChange?(.bluetoothUnavailable(.unauthorized))
         case .unsupported:
+            historyOperation?.fail(HistoryFetchError.bluetoothUnavailable)
             BirdMenuLog.debugData("scanner.state unsupported")
             onStatusChange?(.bluetoothUnavailable(.unsupported))
         case .resetting:
+            historyOperation?.fail(HistoryFetchError.bluetoothUnavailable)
             BirdMenuLog.debugData("scanner.state resetting")
             onStatusChange?(.starting)
         case .unknown:
@@ -153,15 +172,18 @@ final class InkbirdScanner: NSObject, CBCentralManagerDelegate {
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
         BirdMenuLog.debugData("central.didFailToConnect id=\(peripheral.identifier.uuidString) error=\(error?.localizedDescription ?? "-")")
-        historyOperation?.fail(error ?? HistoryFetchError.connectionFailed)
+        disconnectingPeripheralIDs.remove(peripheral.identifier)
+        historyOperation?.didFailToConnect(peripheral, error: error)
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         BirdMenuLog.debugData("central.didDisconnect id=\(peripheral.identifier.uuidString) error=\(error?.localizedDescription ?? "-")")
+        disconnectingPeripheralIDs.remove(peripheral.identifier)
         historyOperation?.didDisconnect(peripheral, error: error)
     }
 
     private func startScan() {
+        guard centralManager.state == .poweredOn, historyOperation == nil else { return }
         BirdMenuLog.debugData("scanner.startScan service=\(InkbirdAdvertisementParser.serviceUUIDString)")
         stateCheckTimer?.invalidate()
         stateCheckTimer = nil
@@ -204,6 +226,10 @@ final class InkbirdScanner: NSObject, CBCentralManagerDelegate {
 }
 
 extension InkbirdScanner: CBPeripheralDelegate {
+    func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
+        historyOperation?.peripheralIsReady(toSendWriteWithoutResponse: peripheral)
+    }
+
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         BirdMenuLog.debugData("peripheral.didDiscoverServices id=\(peripheral.identifier.uuidString) error=\(error?.localizedDescription ?? "-")")
         historyOperation?.peripheral(peripheral, didDiscoverServices: error)
@@ -238,10 +264,12 @@ enum HistoryFetchError: LocalizedError {
     case serviceNotFound
     case historyCharacteristicNotFound
     case disconnected
+    case cancelled
     case historyFlowIncomplete(String)
     case historyDecodeFailed
     case timedOut(String)
     case partialDumpSaved(reason: String, rawPath: String, csvPath: String?)
+    case failureDumpFailed(reason: String, rawPath: String?)
 
     var errorDescription: String? {
         switch self {
@@ -259,6 +287,8 @@ enum HistoryFetchError: LocalizedError {
             "A supported history command characteristic was not found."
         case .disconnected:
             "The device disconnected during history fetch."
+        case .cancelled:
+            AppText.localized(en: "History fetch was cancelled.", ja: "履歴の取得をキャンセルしました。")
         case let .historyFlowIncomplete(detail):
             "History fetch did not complete the expected command flow: \(detail)."
         case .historyDecodeFailed:
@@ -277,6 +307,13 @@ enum HistoryFetchError: LocalizedError {
                     ja: "\(reason)\n\n失敗前に取得できた生データを保存しました。\nRaw: \(rawPath)"
                 )
             }
+        case let .failureDumpFailed(reason, rawPath):
+            AppText.localized(
+                en: "\(reason)\n\nThe latest partial history could not be saved."
+                    + (rawPath.map { "\nEarlier raw snapshot: \($0)" } ?? ""),
+                ja: "\(reason)\n\n最新の部分履歴を保存できませんでした。"
+                    + (rawPath.map { "\n以前の生データ: \($0)" } ?? "")
+            )
         }
     }
 }
@@ -311,13 +348,14 @@ private final class HistoryFetchOperation: @unchecked Sendable {
     private static let ith11BClockCharacteristicUUID = CBUUID(string: "0000FFF7-0000-1000-8000-00805F9B34FB")
     private static let historyCharacteristicUUID = CBUUID(string: "0000FFF8-0000-1000-8000-00805F9B34FB")
     private static let operationTimeout: TimeInterval = 2_400
-    private static let ith11BHistoryQuietTimeout: TimeInterval = 5
 
     private let centralManager: CBCentralManager
     private let peripheral: CBPeripheral
     private weak var peripheralDelegate: CBPeripheralDelegate?
     private let latestReading: InkbirdReading
     private let completion: (Result<InkbirdHistoryResult, Error>) -> Void
+    private let progress: (HistoryFetchProgress) -> Void
+    private let exportQueue = DispatchQueue(label: "st.rio.birdmenu.history-export")
     private let historyCommands: [Command] = [
         Command(name: "temp_header", value: Data([0x02]), quietTimeout: 0.8, maxTimeout: 5, readAfterWrite: true),
         Command(name: "temp_content", value: Data([0x01]), quietTimeout: 10, maxTimeout: 600, readAfterWrite: true),
@@ -351,14 +389,27 @@ private final class HistoryFetchOperation: @unchecked Sendable {
     private var hasStartedCommands = false
     private var modeName = "read-only-gatt-snapshot"
     private var shouldDecodeHistory = false
-    private var issuedCommandNames: Set<String> = []
-    private var missingBlockRecovery = InkbirdITH11BHistoryProtocol.MissingBlockRecoveryTracker()
+    private var ith11BState: ITH11BTransferState?
+    private var pendingUnacknowledgedWrite: CBCharacteristic?
+    private var queuedWithoutResponse: (Data, CBCharacteristic)?
+    private var outputFolder: URL?
+    private var savedResult: InkbirdHistoryResult?
+    private var startedAt = ProcessInfo.processInfo.systemUptime
+    private var setupDeadline: TimeInterval = 0
+    private var lastCheckpointAt: TimeInterval = 0
+    private var reconnectCount = 0
+    private var reconnecting = false
+    private var reconnectReadyAt: TimeInterval?
+    private var reconnectDumpSaved = false
+    private var reconnectDeadline: TimeInterval = 0
+    private var disconnectedWhileSaving = false
 
     init(
         centralManager: CBCentralManager,
         peripheral: CBPeripheral,
         peripheralDelegate: CBPeripheralDelegate,
         latestReading: InkbirdReading,
+        progress: @escaping (HistoryFetchProgress) -> Void,
         completion: @escaping (Result<InkbirdHistoryResult, Error>) -> Void
     ) {
         self.centralManager = centralManager
@@ -366,45 +417,72 @@ private final class HistoryFetchOperation: @unchecked Sendable {
         self.peripheralDelegate = peripheralDelegate
         self.latestReading = latestReading
         self.completion = completion
+        self.progress = progress
     }
 
     func start() {
+        startedAt = ProcessInfo.processInfo.systemUptime
+        setupDeadline = startedAt + 30
+        do {
+            outputFolder = try InkbirdHistoryExportWriter.outputFolder(
+                deviceName: latestReading.deviceName, peripheralID: latestReading.peripheralID
+            )
+        } catch {
+            fail(error)
+            return
+        }
         BirdMenuLog.debugData("history.operation connect id=\(peripheral.identifier.uuidString) name=\(peripheral.name ?? "-")")
         peripheral.delegate = nil
         centralManager.connect(peripheral)
-        operationTimer = Timer.scheduledTimer(withTimeInterval: Self.operationTimeout, repeats: false) { [weak self] _ in
-            self?.fail(HistoryFetchError.timedOut("history operation"))
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            self?.tick()
         }
+        operationTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+        reportProgress(.connecting)
     }
 
     func didConnect(_ peripheral: CBPeripheral) {
-        guard peripheral.identifier == self.peripheral.identifier else {
+        guard accepts(peripheral) else {
             return
         }
         peripheral.delegate = peripheralDelegate
+        setupDeadline = ProcessInfo.processInfo.systemUptime + 30
+        reportProgress(.discovering)
         BirdMenuLog.debugData("history.operation discoverServices id=\(peripheral.identifier.uuidString) scope=all")
         peripheral.discoverServices(nil)
     }
 
     func didDisconnect(_ peripheral: CBPeripheral, error: Error?) {
-        guard peripheral.identifier == self.peripheral.identifier, !completed else {
+        guard peripheral === self.peripheral, !completed else {
             return
         }
-        if case .ith11BTrace = transferMode,
-           InkbirdITH11BHistoryProtocol.isExpectedSessionCloseDisconnect(
-               issuedCommandNames: issuedCommandNames,
-               status: InkbirdHistoryExportWriter.ith11BHistoryBlockStatus(from: packets)
-           ) {
-            BirdMenuLog.debugData("history.operation completedBySessionCloseDisconnect")
-            finish()
+        if reconnecting {
+            scheduleReconnectIfReady()
             return
         }
-        fail(error ?? HistoryFetchError.disconnected)
+        if ith11BState?.phase == .saving {
+            disconnectedWhileSaving = true
+            return
+        }
+        if savedResult != nil {
+            finishSaved(warning: ith11BState?.command == .close && error == nil ? nil
+                : "History is saved locally, but the device's session completion could not be confirmed.")
+            return
+        }
+        handleCommunicationError(error ?? HistoryFetchError.disconnected)
+    }
+
+    func didFailToConnect(_ peripheral: CBPeripheral, error: Error?) {
+        guard accepts(peripheral) else { return }
+        handleCommunicationError(error ?? HistoryFetchError.connectionFailed)
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
+        guard accepts(peripheral) else { return }
+        setupDeadline = ProcessInfo.processInfo.systemUptime + 30
         if let error {
-            fail(error)
+            handleCommunicationError(error)
             return
         }
         let services = peripheral.services ?? []
@@ -421,9 +499,11 @@ private final class HistoryFetchOperation: @unchecked Sendable {
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
+        guard accepts(peripheral) else { return }
+        setupDeadline = ProcessInfo.processInfo.systemUptime + 30
         if let error {
             pendingCharacteristicServiceUUIDs.remove(service.uuid.uuidString)
-            fail(error)
+            handleCommunicationError(error)
             return
         }
 
@@ -447,16 +527,17 @@ private final class HistoryFetchOperation: @unchecked Sendable {
 
     private func configureHistoryTransferIfReady(peripheral: CBPeripheral) {
         BirdMenuLog.debugData("history.operation characteristics=\(characteristics.map { "\($0.characteristicUUID)[\($0.properties.joined(separator: ","))]" }.joined(separator: " "))")
-        configCharacteristic = allDiscoveredCharacteristics.first {
+        let sensorCharacteristics = allDiscoveredCharacteristics.filter { $0.service?.uuid == Self.inkbirdServiceUUID }
+        configCharacteristic = sensorCharacteristics.first {
             $0.uuid == Self.configCharacteristicUUID || $0.uuid == Self.ith11BConfigCharacteristicUUID
         }
-        if let historyCharacteristic = allDiscoveredCharacteristics.first(where: { $0.uuid == Self.historyCharacteristicUUID }) {
+        if let historyCharacteristic = sensorCharacteristics.first(where: { $0.uuid == Self.historyCharacteristicUUID }) {
             transferMode = .legacyFFF8(historyCharacteristic)
             modeName = "fff8-history"
             shouldDecodeHistory = true
-        } else if let ith11BCommandCharacteristic = allDiscoveredCharacteristics.first(where: { $0.uuid == Self.ith11BCommandCharacteristicUUID }),
-                  let ith11BClockCharacteristic = allDiscoveredCharacteristics.first(where: { $0.uuid == Self.ith11BClockCharacteristicUUID }),
-                  let ith11BMissingBlocksCharacteristic = allDiscoveredCharacteristics.first(where: { $0.uuid == Self.ith11BMissingBlocksCharacteristicUUID }) {
+        } else if let ith11BCommandCharacteristic = sensorCharacteristics.first(where: { $0.uuid == Self.ith11BCommandCharacteristicUUID }),
+                  let ith11BClockCharacteristic = sensorCharacteristics.first(where: { $0.uuid == Self.ith11BClockCharacteristicUUID }),
+                  let ith11BMissingBlocksCharacteristic = sensorCharacteristics.first(where: { $0.uuid == Self.ith11BMissingBlocksCharacteristicUUID }) {
             transferMode = .ith11BTrace(
                 command: ith11BCommandCharacteristic,
                 clock: ith11BClockCharacteristic,
@@ -474,11 +555,20 @@ private final class HistoryFetchOperation: @unchecked Sendable {
             BirdMenuLog.debugData("history.operation noHistoryCommandMode mode=readOnlyGattSnapshot")
         }
         notifyCharacteristics = allDiscoveredCharacteristics.filter {
-            $0.uuid == Self.notifyCharacteristicUUID || $0.properties.contains(.notify) || $0.properties.contains(.indicate)
+            $0.properties.contains(.notify) || $0.properties.contains(.indicate)
         }
 
-        let readableCharacteristics = allDiscoveredCharacteristics.filter { $0.properties.contains(.read) }
+        let readableCharacteristics: [CBCharacteristic]
+        if case .ith11BTrace = transferMode {
+            notifyCharacteristics = sensorCharacteristics.filter {
+                $0.uuid == Self.notifyCharacteristicUUID && ($0.properties.contains(.notify) || $0.properties.contains(.indicate))
+            }
+            readableCharacteristics = [configCharacteristic].compactMap { $0 }.filter { $0.properties.contains(.read) }
+        } else {
+            readableCharacteristics = allDiscoveredCharacteristics.filter { $0.properties.contains(.read) }
+        }
         pendingInitialReadKeys = Set(readableCharacteristics.map(characteristicKey))
+        pendingNotificationKeys = Set(notifyCharacteristics.map(characteristicKey))
         for characteristic in readableCharacteristics {
             BirdMenuLog.debugData("history.operation readInitial char=\(characteristic.uuid.uuidString)")
             peripheral.readValue(for: characteristic)
@@ -488,7 +578,6 @@ private final class HistoryFetchOperation: @unchecked Sendable {
             BirdMenuLog.debugData("history.operation enableNotify char=\(characteristic.uuid.uuidString)")
             peripheral.setNotifyValue(true, for: characteristic)
         }
-        pendingNotificationKeys = Set(notifyCharacteristics.map(characteristicKey))
         if notifyCharacteristics.isEmpty {
             fail(HistoryFetchError.historyFlowIncomplete("no notifying characteristic was found"))
             return
@@ -497,8 +586,14 @@ private final class HistoryFetchOperation: @unchecked Sendable {
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
+        guard accepts(peripheral) else { return }
+        setupDeadline = ProcessInfo.processInfo.systemUptime + 30
         if let error {
-            fail(error)
+            handleCommunicationError(error)
+            return
+        }
+        guard characteristic.isNotifying else {
+            fail(HistoryFetchError.historyFlowIncomplete("required notifications were disabled"))
             return
         }
         pendingNotificationKeys.remove(characteristicKey(characteristic))
@@ -506,10 +601,14 @@ private final class HistoryFetchOperation: @unchecked Sendable {
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        guard accepts(peripheral) else { return }
         let readKey = characteristicKey(characteristic)
         let wasPendingInitialRead = pendingInitialReadKeys.remove(readKey) != nil
+        if wasPendingInitialRead {
+            setupDeadline = ProcessInfo.processInfo.systemUptime + 30
+        }
         if let error {
-            fail(error)
+            handleCommunicationError(error)
             return
         }
         guard let value = characteristic.value else {
@@ -517,10 +616,6 @@ private final class HistoryFetchOperation: @unchecked Sendable {
                 startCommandsIfReady()
             }
             return
-        }
-
-        if characteristic.properties.contains(.notify) || characteristic.properties.contains(.indicate) {
-            pendingNotificationKeys.remove(characteristicKey(characteristic))
         }
 
         if characteristic.uuid == Self.configCharacteristicUUID || characteristic.uuid == Self.ith11BConfigCharacteristicUUID {
@@ -534,7 +629,13 @@ private final class HistoryFetchOperation: @unchecked Sendable {
         }
         updateCharacteristicValue(characteristic, value: value)
 
-        let commandName = currentAttempt?.command.name ?? "initial_or_unsolicited"
+        let commandName: String
+        if let state = ith11BState {
+            commandName = state.acceptsHistoryBlocks ? "ith11b_history_data"
+                : state.command?.name ?? "initial_or_unsolicited"
+        } else {
+            commandName = currentAttempt?.command.name ?? "initial_or_unsolicited"
+        }
         packets.append(
             InkbirdHistoryPacket(
                 command: commandName,
@@ -544,10 +645,18 @@ private final class HistoryFetchOperation: @unchecked Sendable {
             )
         )
         BirdMenuLog.debugData("history.packet command=\(commandName) char=\(characteristic.uuid.uuidString) bytes=\(value.count) hex=\(value.hexString)")
-        if wasPendingInitialRead {
+        if ith11BState != nil {
+            let now = ProcessInfo.processInfo.systemUptime
+            let actions = ith11BState?.receive(value, characteristicUUID: characteristic.uuid.uuidString, at: now) ?? []
+            run(actions)
+            if !completed, ith11BState?.phase == .transferring, now - lastCheckpointAt >= 15 {
+                lastCheckpointAt = now
+                saveSnapshot(decodeHistory: false, state: "receiving") { [weak self] result in
+                    if case let .failure(error) = result { self?.fail(error) }
+                }
+            }
+        } else if wasPendingInitialRead {
             startCommandsIfReady()
-        } else if shouldFinishITH11BHistoryContentCommand() {
-            finishCurrentCommand()
         } else {
             currentAttemptReceivedPacket = true
             scheduleQuietTimer()
@@ -555,35 +664,63 @@ private final class HistoryFetchOperation: @unchecked Sendable {
     }
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+        guard accepts(peripheral),
+              let pending = pendingUnacknowledgedWrite,
+              pending === characteristic
+        else { return }
+        pendingUnacknowledgedWrite = nil
         if let error {
-            fail(error)
+            handleCommunicationError(error)
             return
         }
 
-        if currentAttempt?.command.finishesOnWrite == true {
-            finishCurrentCommand()
+        if ith11BState != nil {
+            acknowledgeITH11BWrite(characteristic)
         } else if currentAttempt?.command.readAfterWrite == true, characteristic.properties.contains(.read), !completed {
             peripheral.readValue(for: characteristic)
-        } else if isCurrentITH11BHistoryContentCommand() {
+        } else {
             scheduleQuietTimer()
         }
     }
 
     func fail(_ error: Error) {
-        guard !completed else {
+        guard !completed else { return }
+        if savedResult != nil {
+            finishSaved(warning: "History is saved locally; device session completion is unconfirmed: \(error.localizedDescription)")
             return
         }
         completed = true
         invalidateTimers()
         operationTimer?.invalidate()
         operationTimer = nil
-        let reportedError = errorWithFailureDumpIfUseful(error)
-        BirdMenuLog.debugData("history.operation fail error=\(reportedError.localizedDescription)")
-        completion(.failure(reportedError))
+        ith11BState?.stop()
+        warnings.append("Fetch stopped: \(error.localizedDescription)")
+        BirdMenuLog.error("history.operation failed elapsed=\(Int(ProcessInfo.processInfo.systemUptime - startedAt)) error=\(error)")
+        guard outputFolder != nil, !packets.isEmpty || !characteristics.isEmpty else {
+            completion(.failure(error))
+            return
+        }
+        saveSnapshot(decodeHistory: shouldDecodeHistory, state: "interrupted") { [self] result in
+            switch result {
+            case let .success(dump):
+                completion(.failure(HistoryFetchError.partialDumpSaved(
+                    reason: error.localizedDescription, rawPath: dump.rawURL.path, csvPath: dump.csvURL?.path
+                )))
+            case let .failure(saveError):
+                BirdMenuLog.error("history.operation failureDumpFailed error=\(saveError)")
+                let reason = "\(error.localizedDescription)\nCould not save the latest snapshot: \(saveError.localizedDescription)"
+                if let raw = outputFolder?.appendingPathComponent("raw-history.json"),
+                   FileManager.default.fileExists(atPath: raw.path) {
+                    completion(.failure(HistoryFetchError.failureDumpFailed(reason: reason, rawPath: raw.path)))
+                } else {
+                    completion(.failure(HistoryFetchError.failureDumpFailed(reason: reason, rawPath: nil)))
+                }
+            }
+        }
     }
 
     private func startCommandsIfReady() {
-        guard !hasStartedCommands, pendingNotificationKeys.isEmpty, pendingInitialReadKeys.isEmpty else {
+        guard !completed, !reconnecting, !hasStartedCommands, pendingNotificationKeys.isEmpty, pendingInitialReadKeys.isEmpty else {
             return
         }
         hasStartedCommands = true
@@ -593,11 +730,20 @@ private final class HistoryFetchOperation: @unchecked Sendable {
             return
         case let .legacyFFF8(characteristic):
             commandAttempts = historyCommands.map { CommandAttempt(command: $0, characteristic: characteristic) }
-        case let .ith11BTrace(commandCharacteristic, clockCharacteristic, _):
-            commandAttempts = ith11BTraceCommandAttempts(
-                commandCharacteristic: commandCharacteristic,
-                clockCharacteristic: clockCharacteristic
-            )
+        case .ith11BTrace:
+            guard InkbirdHistoryExportWriter.intervalSeconds(from: configData) != nil else {
+                fail(HistoryFetchError.historyFlowIncomplete("valid recording interval was not received"))
+                return
+            }
+            let date = Date()
+            clockSetAt = date
+            ith11BState = ITH11BTransferState()
+            let actions = ith11BState?.start(
+                clock: InkbirdITH11BHistoryProtocol.timestampCommand(for: date),
+                at: ProcessInfo.processInfo.systemUptime
+            ) ?? []
+            run(actions)
+            return
         }
         BirdMenuLog.debugData(
             "history.operation commandMode=\(modeName) attempts=\(commandAttempts.map { "\($0.command.name)@\($0.characteristic.uuid.uuidString)" }.joined(separator: ","))"
@@ -618,30 +764,16 @@ private final class HistoryFetchOperation: @unchecked Sendable {
         currentAttemptReceivedPacket = false
         let command = attempt.command
         let characteristic = attempt.characteristic
-        if command.name == "ith11b_history_command_04" {
-            let status = InkbirdHistoryExportWriter.ith11BHistoryBlockStatus(from: packets)
-            let records = InkbirdHistoryExportWriter.decodeITH11BRecords(
-                packets: packets,
-                intervalSeconds: InkbirdHistoryExportWriter.intervalSeconds(from: configData),
-                latestReading: latestReading,
-                clockSetAt: clockSetAt
-            )
-            guard let status, status.isComplete, records.count == status.expectedRecordCount else {
-                fail(HistoryFetchError.historyFlowIncomplete(
-                    "history blocks or timestamps could not be validated before command 04"
-                ))
-                return
-            }
-        }
         let writeType: CBCharacteristicWriteType = characteristic.properties.contains(.write) ? .withResponse : .withoutResponse
         BirdMenuLog.debugData("history.command write name=\(command.name) value=\(command.value.hexString) char=\(characteristic.uuid.uuidString) type=\(writeType == .withResponse ? "withResponse" : "withoutResponse")")
-        issuedCommandNames.insert(command.name)
-        peripheral.writeValue(command.value, for: characteristic, type: writeType)
-        maxTimer = Timer.scheduledTimer(withTimeInterval: command.maxTimeout, repeats: false) { [weak self] _ in
+        guard write(command.value, to: characteristic) else { return }
+        let deadlineTimer = Timer(timeInterval: command.maxTimeout, repeats: false) { [weak self] _ in
             BirdMenuLog.debugData("history.command maxTimeout name=\(command.name)")
             self?.fail(HistoryFetchError.timedOut(command.name))
         }
-        if writeType == .withoutResponse {
+        maxTimer = deadlineTimer
+        RunLoop.main.add(deadlineTimer, forMode: .common)
+        if writeType == .withoutResponse, queuedWithoutResponse == nil {
             if command.finishesOnWrite {
                 finishCurrentCommand()
             } else if command.readAfterWrite, characteristic.properties.contains(.read) {
@@ -654,25 +786,23 @@ private final class HistoryFetchOperation: @unchecked Sendable {
 
     private func scheduleQuietTimer() {
         quietTimer?.invalidate()
-        guard let currentAttempt else {
+        guard let currentAttempt, pendingUnacknowledgedWrite == nil, queuedWithoutResponse == nil else {
             return
         }
         guard currentAttemptReceivedPacket || !currentAttempt.command.readAfterWrite else {
             return
         }
-        quietTimer = Timer.scheduledTimer(withTimeInterval: currentAttempt.command.quietTimeout, repeats: false) { [weak self] _ in
+        let timer = Timer(timeInterval: currentAttempt.command.quietTimeout, repeats: false) { [weak self] _ in
             if let commandName = self?.currentAttempt?.command.name {
                 BirdMenuLog.debugData("history.command quietTimeout name=\(commandName)")
             }
             self?.handleQuietTimeout()
         }
+        quietTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     private func handleQuietTimeout() {
-        if isCurrentITH11BHistoryContentCommand() {
-            requestMissingITH11BHistoryBlocks()
-            return
-        }
         finishCurrentCommand()
     }
 
@@ -682,127 +812,285 @@ private final class HistoryFetchOperation: @unchecked Sendable {
         writeNextCommand()
     }
 
-    private func shouldFinishITH11BHistoryContentCommand() -> Bool {
-        guard isCurrentITH11BHistoryContentCommand() else {
+    private func accepts(_ peripheral: CBPeripheral) -> Bool {
+        peripheral === self.peripheral && !completed && !reconnecting
+    }
+
+    private func tick() {
+        guard !completed else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        if now - startedAt >= Self.operationTimeout {
+            fail(HistoryFetchError.timedOut("history operation (40-minute safety limit)"))
+            return
+        }
+        if reconnecting {
+            if reconnectReadyAt == nil, now >= reconnectDeadline {
+                fail(HistoryFetchError.timedOut("disconnect and snapshot save before reconnect"))
+                return
+            }
+            if let readyAt = reconnectReadyAt, now >= readyAt {
+                restartConnection()
+            }
+            reportProgress(.reconnecting)
+        } else if !hasStartedCommands {
+            if now >= setupDeadline {
+                handleCommunicationError(HistoryFetchError.timedOut("connection or service discovery"))
+            }
+        } else if ith11BState != nil {
+            run(ith11BState?.tick(at: now) ?? [])
+            if !completed {
+                switch ith11BState?.phase {
+                case .saving: reportProgress(.saving)
+                case .finalizing: reportProgress(.finalizing)
+                default:
+                    let recovering: Bool
+                    switch ith11BState?.command {
+                    case .missing, .retry: recovering = true
+                    default: recovering = false
+                    }
+                    reportProgress(recovering ? .recovering : .receiving)
+                }
+            }
+        }
+    }
+
+    private func reportProgress(_ phase: HistoryFetchProgress.Phase) {
+        let status = ith11BState?.status
+        progress(HistoryFetchProgress(
+            phase: phase,
+            receivedRecords: status?.decodedRecordCount ?? 0,
+            expectedRecords: status?.expectedRecordCount,
+            receivedBlocks: status?.receivedSequences.count ?? 0,
+            expectedBlocks: status?.expectedBlockCount,
+            elapsed: ProcessInfo.processInfo.systemUptime - startedAt
+        ))
+    }
+
+    private func run(_ actions: [ITH11BTransferState.Action]) {
+        guard !completed, !reconnecting else { return }
+        for action in actions {
+            guard !completed else { return }
+            switch action {
+            case let .write(command):
+                guard let characteristic = allDiscoveredCharacteristics.first(where: {
+                    $0.service?.uuid == Self.inkbirdServiceUUID && $0.uuid == CBUUID(string: command.characteristicUUID)
+                }) else {
+                    fail(HistoryFetchError.historyCharacteristicNotFound)
+                    return
+                }
+                BirdMenuLog.info("history.command \(command.name) received=\(ith11BState?.status?.receivedSequences.count ?? 0) retries=\(ith11BState?.recovery.retryRound ?? 0)")
+                _ = write(command.value, to: characteristic)
+            case .save:
+                let records = InkbirdHistoryExportWriter.decodeITH11BRecords(
+                    packets: packets, intervalSeconds: InkbirdHistoryExportWriter.intervalSeconds(from: configData),
+                    latestReading: latestReading, clockSetAt: clockSetAt
+                )
+                guard let status = ith11BState?.status, status.isComplete,
+                      records.count == status.expectedRecordCount else {
+                    fail(HistoryFetchError.historyDecodeFailed)
+                    return
+                }
+                reportProgress(.saving)
+                saveSnapshot(decodeHistory: true, state: "saved_before_device_confirmation") { [self] result in
+                    guard !completed else { return }
+                    switch result {
+                    case let .success(saved):
+                        guard saved.isComplete else {
+                            fail(HistoryFetchError.historyDecodeFailed)
+                            return
+                        }
+                        savedResult = saved
+                        if disconnectedWhileSaving {
+                            finishSaved(warning: "History is saved locally; the device disconnected before session confirmation.")
+                        } else {
+                            run(ith11BState?.didSave(at: ProcessInfo.processInfo.systemUptime) ?? [])
+                        }
+                    case let .failure(error):
+                        fail(error)
+                    }
+                }
+            case .finish:
+                finishSaved(warning: nil)
+            case let .fail(reason):
+                fail(HistoryFetchError.historyFlowIncomplete(reason))
+            }
+        }
+    }
+
+    @discardableResult
+    private func write(_ value: Data, to characteristic: CBCharacteristic) -> Bool {
+        guard pendingUnacknowledgedWrite == nil, queuedWithoutResponse == nil else {
+            fail(HistoryFetchError.historyFlowIncomplete("another write is still awaiting completion"))
             return false
         }
-        guard let status = InkbirdHistoryExportWriter.ith11BHistoryBlockStatus(from: packets),
-              status.isComplete
-        else {
+        let withResponse = characteristic.properties.contains(.write)
+        guard withResponse || characteristic.properties.contains(.writeWithoutResponse) else {
+            fail(HistoryFetchError.historyCharacteristicNotFound)
             return false
         }
-        BirdMenuLog.debugData(
-            "history.command complete expected=\(status.expectedRecordCount) decoded=\(status.decodedRecordCount) blocks=\(status.receivedSequences)"
-        )
+        let type: CBCharacteristicWriteType = withResponse ? .withResponse : .withoutResponse
+        guard value.count <= peripheral.maximumWriteValueLength(for: type) else {
+            fail(HistoryFetchError.historyFlowIncomplete("command exceeds the connection's maximum write length"))
+            return false
+        }
+        if withResponse {
+            pendingUnacknowledgedWrite = characteristic
+        } else if !peripheral.canSendWriteWithoutResponse {
+            queuedWithoutResponse = (value, characteristic)
+            return true
+        }
+        peripheral.writeValue(value, for: characteristic, type: type)
+        if !withResponse, ith11BState != nil {
+            acknowledgeITH11BWrite(characteristic)
+        }
         return true
     }
 
-    private func isCurrentITH11BHistoryContentCommand() -> Bool {
-        let name = currentAttempt?.command.name
-        return name == "ith11b_history_command_01" || name == "ith11b_history_command_03"
+    func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
+        guard accepts(peripheral), let (value, characteristic) = queuedWithoutResponse else { return }
+        queuedWithoutResponse = nil
+        guard write(value, to: characteristic), !completed, queuedWithoutResponse == nil else { return }
+        if ith11BState == nil, characteristic.properties.contains(.read) {
+            peripheral.readValue(for: characteristic)
+        }
     }
 
-    private func requestMissingITH11BHistoryBlocks() {
-        guard let status = InkbirdHistoryExportWriter.ith11BHistoryBlockStatus(from: packets) else {
-            fail(HistoryFetchError.historyFlowIncomplete("history header was not received"))
-            return
-        }
-        guard status.isComplete || !status.missingSequences.isEmpty else {
-            fail(HistoryFetchError.historyFlowIncomplete(
-                "received all blocks but decoded \(status.decodedRecordCount) of \(status.expectedRecordCount) records"
-            ))
-            return
-        }
-
-        let round: Int
-        switch missingBlockRecovery.nextDecision(status: status) {
-        case .complete:
-            finishCurrentCommand()
-            return
-        case let .retry(nextRound):
-            round = nextRound
-        case let .stalled(retryRounds, missingSequences):
-            fail(HistoryFetchError.historyFlowIncomplete(
-                "missing blocks after \(retryRounds) retries with no progress: \(missingSequences)"
-            ))
-            return
-        case let .timedOut(retryRounds, missingSequences):
-            fail(HistoryFetchError.historyFlowIncomplete(
-                "missing-block recovery timed out after \(retryRounds) retries: \(missingSequences)"
-            ))
-            return
-        }
-
-        guard case let .ith11BTrace(commandCharacteristic, _, missingBlocksCharacteristic) = transferMode,
-              let request = InkbirdITH11BHistoryProtocol.missingBlockRequest(sequences: status.missingSequences)
-        else {
-            fail(HistoryFetchError.historyFlowIncomplete("could not build the missing-block request"))
-            return
-        }
-
-        BirdMenuLog.debugData(
-            "history.command retryMissingBlocks round=\(round) missing=\(status.missingSequences) received=\(status.receivedSequences)"
-        )
-        let retryAttempts = [
-            CommandAttempt(
-                command: Command(
-                    name: "ith11b_missing_blocks_round_\(round)",
-                    value: request,
-                    quietTimeout: 0,
-                    maxTimeout: 10,
-                    readAfterWrite: false,
-                    finishesOnWrite: true
-                ),
-                characteristic: missingBlocksCharacteristic
-            ),
-            CommandAttempt(
-                command: Command(
-                    name: "ith11b_history_command_03",
-                    value: Data([0x03]),
-                    quietTimeout: Self.ith11BHistoryQuietTimeout,
-                    maxTimeout: 120,
-                    readAfterWrite: false
-                ),
-                characteristic: commandCharacteristic
-            )
-        ]
-        commandAttempts.insert(contentsOf: retryAttempts, at: commandAttemptIndex)
-        finishCurrentCommand()
+    private func acknowledgeITH11BWrite(_ characteristic: CBCharacteristic) {
+        guard let uuid = ith11BState?.command?.characteristicUUID,
+              characteristic.uuid == CBUUID(string: uuid) else { return }
+        run(ith11BState?.didWrite(characteristicUUID: uuid, at: ProcessInfo.processInfo.systemUptime) ?? [])
     }
 
-    private func errorWithFailureDumpIfUseful(_ error: Error) -> Error {
-        guard let result = saveFailureDumpIfUseful(error: error) else {
-            return error
+    private func saveSnapshot(
+        decodeHistory: Bool,
+        state: String,
+        completion: @escaping @Sendable (Result<InkbirdHistoryResult, Error>) -> Void
+    ) {
+        let reading = latestReading
+        let config = configData
+        let characteristics = characteristics
+        let packets = packets
+        let warnings = warnings
+        let mode = modeName
+        let clock = clockSetAt
+        let folder = outputFolder
+        exportQueue.async {
+            let result = Result {
+                try InkbirdHistoryExportWriter.write(
+                    deviceName: reading.deviceName, peripheralID: reading.peripheralID,
+                    latestReading: reading, config: config, characteristics: characteristics,
+                    packets: packets, warnings: warnings, mode: mode, decodeHistory: decodeHistory,
+                    clockSetAt: clock, folderURL: folder, transferState: state
+                )
+            }
+            DispatchQueue.main.async { completion(result) }
         }
-        return HistoryFetchError.partialDumpSaved(
-            reason: error.localizedDescription,
-            rawPath: result.rawURL.path,
-            csvPath: result.csvURL?.path
-        )
     }
 
-    private func saveFailureDumpIfUseful(error: Error) -> InkbirdHistoryResult? {
-        guard hasStartedCommands || !packets.isEmpty || !characteristics.isEmpty else {
-            return nil
+    private func handleCommunicationError(_ error: Error) {
+        guard !completed, !reconnecting else { return }
+        guard savedResult == nil, ith11BState?.phase != .saving,
+              HistoryReconnectPolicy.shouldRestart(error: error, previousRestarts: reconnectCount) else {
+            fail(error)
+            return
+        }
+        reconnecting = true
+        reconnectCount += 1
+        reconnectDumpSaved = false
+        reconnectDeadline = ProcessInfo.processInfo.systemUptime + 30
+        pendingUnacknowledgedWrite = nil
+        queuedWithoutResponse = nil
+        invalidateTimers()
+        warnings.append("Connection interrupted; restarting as a separate history snapshot: \(error.localizedDescription)")
+        BirdMenuLog.info("history.reconnect attempt=\(reconnectCount) error=\(error)")
+        reportProgress(.reconnecting)
+        if peripheral.state != .disconnected {
+            centralManager.cancelPeripheralConnection(peripheral)
+        }
+        saveSnapshot(decodeHistory: shouldDecodeHistory, state: "interrupted_before_restart") { [self] result in
+            guard !completed else { return }
+            switch result {
+            case let .success(saved):
+                warnings.append("Previous partial snapshot: \(saved.rawURL.path)")
+                reconnectDumpSaved = true
+                scheduleReconnectIfReady()
+            case let .failure(saveError):
+                fail(saveError)
+            }
+        }
+    }
+
+    private func scheduleReconnectIfReady() {
+        guard reconnecting, reconnectDumpSaved, peripheral.state == .disconnected,
+              reconnectReadyAt == nil else { return }
+        reconnectReadyAt = ProcessInfo.processInfo.systemUptime + Double(reconnectCount * 2)
+    }
+
+    private func restartConnection() {
+        guard peripheral.state == .disconnected, centralManager.state == .poweredOn else {
+            fail(HistoryFetchError.bluetoothUnavailable)
+            return
         }
         do {
-            let result = try InkbirdHistoryExportWriter.write(
-                deviceName: latestReading.deviceName,
-                peripheralID: latestReading.peripheralID,
-                latestReading: latestReading,
-                config: configData,
-                characteristics: characteristics,
-                packets: packets,
-                warnings: warnings + ["Fetch failed: \(error.localizedDescription)"],
-                mode: modeName,
-                decodeHistory: shouldDecodeHistory,
-                clockSetAt: clockSetAt
+            outputFolder = try InkbirdHistoryExportWriter.outputFolder(
+                deviceName: latestReading.deviceName, peripheralID: latestReading.peripheralID
             )
-            BirdMenuLog.debugData("history.operation wroteFailureDump raw=\(result.rawURL.path) csv=\(result.csvURL?.path ?? "-") packets=\(result.packetCount) records=\(result.recordCount)")
-            return result
         } catch {
-            BirdMenuLog.error("history.operation failureDumpFailed error=\(error.localizedDescription)")
-            return nil
+            fail(error)
+            return
+        }
+        // A new connection is a new snapshot; never merge block numbers across sessions.
+        packets = []
+        characteristics = []
+        allDiscoveredCharacteristics = []
+        configCharacteristic = nil
+        configData = nil
+        clockSetAt = nil
+        service = nil
+        notifyCharacteristics = []
+        pendingInitialReadKeys = []
+        pendingNotificationKeys = []
+        pendingCharacteristicServiceUUIDs = []
+        commandAttempts = []
+        commandAttemptIndex = 0
+        currentAttempt = nil
+        ith11BState = nil
+        transferMode = .readOnlySnapshot
+        modeName = "read-only-gatt-snapshot"
+        shouldDecodeHistory = false
+        hasStartedCommands = false
+        reconnecting = false
+        reconnectReadyAt = nil
+        disconnectedWhileSaving = false
+        setupDeadline = ProcessInfo.processInfo.systemUptime + 30
+        peripheral.delegate = nil
+        centralManager.connect(peripheral)
+        reportProgress(.connecting)
+    }
+
+    private func finishSaved(warning: String?) {
+        guard !completed, var saved = savedResult else { return }
+        completed = true
+        ith11BState?.stop()
+        invalidateTimers()
+        operationTimer?.invalidate()
+        operationTimer = nil
+        if let warning {
+            warnings.append(warning)
+            saved.warnings.append(warning)
+            BirdMenuLog.error("history.session unconfirmed \(warning)")
+        }
+        let retained = saved
+        saveSnapshot(decodeHistory: true, state: warning == nil ? "complete" : "saved_session_unconfirmed") { [self] result in
+            switch result {
+            case let .success(final):
+                completion(.success(final))
+            case let .failure(error):
+                var final = retained
+                final.warnings.append("History was saved, but final status could not be updated: \(error.localizedDescription)")
+                BirdMenuLog.error("history.finalStatusSaveFailed error=\(error)")
+                completion(.success(final))
+            }
         }
     }
 
@@ -810,29 +1098,23 @@ private final class HistoryFetchOperation: @unchecked Sendable {
         guard !completed else {
             return
         }
-        completed = true
         invalidateTimers()
-        operationTimer?.invalidate()
-        operationTimer = nil
         do {
             try validateSuccessfulHistoryFlow()
-            let result = try InkbirdHistoryExportWriter.write(
-                deviceName: latestReading.deviceName,
-                peripheralID: latestReading.peripheralID,
-                latestReading: latestReading,
-                config: configData,
-                characteristics: characteristics,
-                packets: packets,
-                warnings: warnings,
-                mode: modeName,
-                decodeHistory: shouldDecodeHistory,
-                clockSetAt: clockSetAt
-            )
-            BirdMenuLog.debugData("history.operation wrote raw=\(result.rawURL.path) csv=\(result.csvURL?.path ?? "-") packets=\(result.packetCount) records=\(result.recordCount)")
-            completion(.success(result))
+            currentAttempt = nil
+            saveSnapshot(decodeHistory: shouldDecodeHistory, state: "complete") { [self] result in
+                guard !completed else { return }
+                switch result {
+                case let .success(saved):
+                    completed = true
+                    operationTimer?.invalidate()
+                    operationTimer = nil
+                    completion(.success(saved))
+                case let .failure(error): fail(error)
+                }
+            }
         } catch {
-            let reportedError = errorWithFailureDumpIfUseful(error)
-            completion(.failure(reportedError))
+            fail(error)
         }
     }
 
@@ -849,25 +1131,7 @@ private final class HistoryFetchOperation: @unchecked Sendable {
                 throw HistoryFetchError.historyFlowIncomplete("missing \(missing.joined(separator: ", "))")
             }
         case .ith11BTrace:
-            guard packets.contains(where: { $0.command == "ith11b_history_command_02" }) else {
-                throw HistoryFetchError.historyFlowIncomplete("missing history header")
-            }
-            guard issuedCommandNames.contains("ith11b_history_command_01"),
-                  issuedCommandNames.contains("ith11b_history_command_04"),
-                  issuedCommandNames.contains("ith11b_session_command_05")
-            else {
-                throw HistoryFetchError.historyFlowIncomplete("history content, completion, or session-close command was not issued")
-            }
-            guard let status = InkbirdHistoryExportWriter.ith11BHistoryBlockStatus(from: packets), status.isComplete else {
-                throw HistoryFetchError.historyFlowIncomplete("history block set was incomplete")
-            }
-            let records = InkbirdHistoryExportWriter.decodeITH11BRecords(
-                packets: packets,
-                intervalSeconds: InkbirdHistoryExportWriter.intervalSeconds(from: configData),
-                latestReading: latestReading,
-                clockSetAt: clockSetAt
-            )
-            guard !records.isEmpty else {
+            guard ith11BState?.locallySaved == true else {
                 throw HistoryFetchError.historyDecodeFailed
             }
         }
@@ -882,7 +1146,8 @@ private final class HistoryFetchOperation: @unchecked Sendable {
 
     private func updateCharacteristicValue(_ characteristic: CBCharacteristic, value: Data) {
         characteristics = characteristics.map {
-            guard $0.characteristicUUID == characteristic.uuid.uuidString else {
+            guard $0.characteristicUUID == characteristic.uuid.uuidString,
+                  $0.serviceUUID == characteristic.service?.uuid.uuidString else {
                 return $0
             }
             return InkbirdGATTCharacteristicInfo(
@@ -898,67 +1163,21 @@ private final class HistoryFetchOperation: @unchecked Sendable {
         "\(characteristic.service?.uuid.uuidString ?? "-")/\(characteristic.uuid.uuidString)"
     }
 
-    private func ith11BTraceCommandAttempts(
-        commandCharacteristic: CBCharacteristic,
-        clockCharacteristic: CBCharacteristic
-    ) -> [CommandAttempt] {
-        let clockSetAt = Date()
-        self.clockSetAt = clockSetAt
-        return [
-            CommandAttempt(
-                command: Command(
-                    name: "ith11b_set_clock",
-                    value: InkbirdITH11BHistoryProtocol.timestampCommand(for: clockSetAt),
-                    quietTimeout: 0,
-                    maxTimeout: 5,
-                    readAfterWrite: false,
-                    finishesOnWrite: true
-                ),
-                characteristic: clockCharacteristic
-            ),
-            CommandAttempt(
-                command: Command(
-                    name: "ith11b_history_command_02",
-                    value: Data([0x02]),
-                    quietTimeout: 0.05,
-                    maxTimeout: 10,
-                    readAfterWrite: false
-                ),
-                characteristic: commandCharacteristic
-            ),
-            CommandAttempt(
-                command: Command(
-                    name: "ith11b_history_command_01",
-                    value: Data([0x01]),
-                    quietTimeout: Self.ith11BHistoryQuietTimeout,
-                    maxTimeout: 1_800,
-                    readAfterWrite: false
-                ),
-                characteristic: commandCharacteristic
-            ),
-            CommandAttempt(
-                command: Command(
-                    name: "ith11b_history_command_04",
-                    value: Data([0x04]),
-                    quietTimeout: 0,
-                    maxTimeout: 60,
-                    readAfterWrite: false,
-                    finishesOnWrite: true
-                ),
-                characteristic: commandCharacteristic
-            ),
-            CommandAttempt(
-                command: Command(
-                    name: "ith11b_session_command_05",
-                    value: Data([0x05]),
-                    quietTimeout: 0,
-                    maxTimeout: 10,
-                    readAfterWrite: false,
-                    finishesOnWrite: true
-                ),
-                characteristic: commandCharacteristic
-            )
-        ]
+}
+
+enum HistoryReconnectPolicy {
+    static func shouldRestart(error: Error, previousRestarts: Int) -> Bool {
+        guard previousRestarts < 2 else { return false }
+        if let error = error as? HistoryFetchError {
+            switch error {
+            case .disconnected, .connectionFailed, .timedOut: return true
+            default: return false
+            }
+        }
+        let error = error as NSError
+        guard error.domain == CBErrorDomain else { return false }
+        return [CBError.Code.connectionTimeout, .peripheralDisconnected, .connectionFailed, .notConnected]
+            .contains { $0.rawValue == error.code }
     }
 }
 
