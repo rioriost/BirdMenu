@@ -17,6 +17,51 @@ import Testing
         #expect(!item.isEnabled)
     }
 
+    @Test @MainActor func emptyHistoryExplainsNextStepAndDisablesGeneration() async throws {
+        _ = NSApplication.shared
+        let root = try makeHistoryFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let controller = HistoryChartWindowController(historyRoot: root)
+        let content = try #require(controller.window?.contentView)
+        controller.refreshHistorySensors()
+        let status = try #require(descendants(content).compactMap { $0 as? NSTextField }.first { $0.accessibilityIdentifier() == "historyChartStatus" })
+        for _ in 0..<100 where status.stringValue != AppText.noSavedHistory {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(status.stringValue == AppText.noSavedHistory)
+        let generate = try #require(descendants(content).compactMap { $0 as? NSButton }.first { $0.title == AppText.generateHistoryChart })
+        #expect(!generate.isEnabled)
+        #expect(descendants(content).compactMap { $0 as? NSPopUpButton }.allSatisfy { !$0.isEnabled })
+    }
+
+    @Test @MainActor func historyGraphFlowProducesFileAndOffersReveal() async throws {
+        _ = NSApplication.shared
+        let root = try makeHistoryFolder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let now = Date()
+        let timestamp = ISO8601DateFormatter().string(from: now)
+        _ = try writeCSV(root, name: "sample-AAAAAA", sensorID: "11111111-1111-1111-1111-111111AAAAAA", rows: ["\(timestamp),0,23,45"])
+        let controller = HistoryChartWindowController(historyRoot: root)
+        let content = try #require(controller.window?.contentView)
+        let views = descendants(content)
+        let generate = try #require(views.compactMap { $0 as? NSButton }.first { $0.keyEquivalent == "\r" })
+        let reveal = try #require(views.compactMap { $0 as? NSButton }.first { $0.title == AppText.showInFinder })
+        controller.refreshHistorySensors()
+        for _ in 0..<100 where !generate.isEnabled { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(generate.isEnabled)
+        generate.performClick(nil)
+        #expect(!generate.isEnabled)
+        for _ in 0..<200 where reveal.isHidden { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(!reveal.isHidden)
+        #expect(generate.isEnabled)
+        let files = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+        #expect(files.contains { $0.pathExtension == "png" })
+    }
+
+    @MainActor private func descendants(_ view: NSView) -> [NSView] {
+        view.subviews.flatMap { [$0] + descendants($0) }
+    }
+
     @Test func duplicateRequestsAndUnrelatedCompletionsDoNotClearBusyState() throws {
         var state = HistoryUIRequestState()
         let firstRequest = state.begin()
@@ -221,10 +266,10 @@ import Testing
     @Test func chartPickerRequiresChoiceForMultipleSensorsAndRetainsIt() {
         let first = InkbirdHistoryChartSensor(id: UUID().uuidString)
         let second = InkbirdHistoryChartSensor(id: UUID().uuidString)
-        #expect(SettingsWindowController.chartSensorSelection(previousID: nil, sensors: [first, second]) == nil)
-        #expect(SettingsWindowController.chartSensorSelection(previousID: second.id, sensors: [first, second]) == second.id)
-        #expect(SettingsWindowController.chartSensorSelection(previousID: nil, sensors: [first]) == first.id)
-        #expect(SettingsWindowController.chartSensorSelection(previousID: first.id, sensors: []) == nil)
+        #expect(HistoryChartWindowController.chartSensorSelection(previousID: nil, sensors: [first, second]) == nil)
+        #expect(HistoryChartWindowController.chartSensorSelection(previousID: second.id, sensors: [first, second]) == second.id)
+        #expect(HistoryChartWindowController.chartSensorSelection(previousID: nil, sensors: [first]) == first.id)
+        #expect(HistoryChartWindowController.chartSensorSelection(previousID: first.id, sensors: []) == nil)
     }
 
     @Test func fullSensorIDsSeparateOverlappingAndDisjointHistories() throws {

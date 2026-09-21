@@ -1,6 +1,6 @@
 # BirdMenu プライバシーポリシー
 
-最終更新日: 2026年6月29日
+最終更新日: 2026年9月21日
 
 BirdMenuは、対応するBluetooth Low Energy温湿度センサーの値を表示するmacOSメニューバーアプリです。
 
@@ -32,13 +32,15 @@ BirdMenuは、近くにある対応センサーから次のデータを処理す
 ~/Documents/BirdMenu Logs/
 ```
 
+App Store版では、このDocumentsフォルダはBirdMenuのmacOSサンドボックス内にあります。BirdMenuメニューの「履歴フォルダを開く」から実際の保存場所を開けます。
+
 書き出されるファイルには、次のものが含まれる場合があります。
 
 - `raw-history.json`
 - `history.csv`
 - `history_yyyymmdd.png`
 
-アプリのメニューでデバッグログを有効にした場合、BirdMenuは受信したBluetooth測定値やパケット情報をmacOS Unified Loggingに記録することがあります。これらのログはMac上に残り、macOSによって管理されます。
+設定でデバッグログを有効にした場合、BirdMenuは受信したBluetooth測定値やパケット情報をmacOS Unified Loggingに記録することがあります。これらのログはMac上に残り、macOSによって管理されます。
 
 ## データ共有
 
@@ -54,7 +56,7 @@ BirdMenuは、対応センサーを検出し通信するためにBluetoothアク
 
 ## データ削除
 
-書き出された履歴ファイルは、次の場所からいつでも削除できます。
+書き出された履歴ファイルはいつでも削除できます。BirdMenuメニューの「履歴フォルダを開く」を選び、Finderでファイルを削除してください。保存先フォルダは次のとおりです。
 
 ```text
 ~/Documents/BirdMenu Logs/

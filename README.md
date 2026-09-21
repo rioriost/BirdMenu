@@ -29,7 +29,7 @@ For compatible devices exposing `fff8`, BirdMenu uses the history-read command p
 
 If neither supported characteristic layout is present, BirdMenu saves a read-only GATT snapshot and reports that history retrieval is unsupported. It does not write unknown history commands. No history path writes to the history-delete characteristic `fff9`.
 
-Fetched data is saved under `~/Documents/BirdMenu Logs/`. The app always writes a raw JSON dump. If the packet layout can be decoded confidently, it also writes `history.csv`.
+Fetched data is saved under `~/Documents/BirdMenu Logs/`. In the App Store version, this Documents directory is inside the macOS sandbox container; use **Open History Folder** to open the actual location. The app always writes a raw JSON dump. If the packet layout can be decoded confidently, it also writes `history.csv`.
 
 The menu shows history progress and offers cancellation. ITH-11-B transfers allow a 15-second gap before requesting missing blocks, back off subsequent requests up to 60 seconds, and stop after 180 seconds without a new valid block. Duplicate or unrelated notifications do not extend that deadline. Continuous progress is not cut off by the old 120/300-second limits; a 40-minute overall safety limit remains. Connection/setup and command responses normally have a 30-second deadline, with 60 seconds allowed for the device's completion write.
 
@@ -37,7 +37,7 @@ For recognized transient connection errors, BirdMenu saves the interrupted snaps
 
 Raw checkpoints are saved during reception and on interruption. A successful empty history is shown as no new records, not a decoding error. If the complete history was saved but the final device handshake could not be confirmed, BirdMenu keeps the files and displays a warning. Quitting during a fetch waits for cancellation and the save attempt.
 
-Use Settings to select a sensor and generate a graph for a specific local date. BirdMenu scans the saved `history.csv` files that still exist under `~/Documents/BirdMenu Logs/`, combines records only for that sensor and date, and writes a sensor-specific PNG to the logs folder. Full device IDs in raw exports are preferred; ambiguous legacy sensor IDs are reported instead of silently mixing sensors. CSV loading and graph rendering run off the UI thread.
+Choose **History Graph…** from the menu to select a sensor and generate a graph for a specific local date. BirdMenu scans the saved `history.csv` files that still exist under `~/Documents/BirdMenu Logs/`, combines records only for that sensor and date, and writes a sensor-specific PNG to the logs folder. Full device IDs in raw exports are preferred; ambiguous legacy sensor IDs are reported instead of silently mixing sensors. CSV loading and graph rendering run off the UI thread.
 
 For observed sensors, the companion-app command sequence appears to return records that have not yet been synced rather than the full retained memory every time. In practice this means repeated fetches may produce only the new records since the previous successful sync. Keep the raw JSON files if you need to audit or re-decode the captured BLE packets later.
 
@@ -47,7 +47,7 @@ When displaying the average of multiple sensors, freshness reflects the **oldest
 
 ## Debug Logging
 
-Enable `Debug Logging` from the menu to write received BLE data to macOS Unified Logging. The app logs decoded temperature/humidity/battery/RSSI values, raw advertisement bytes, and history-fetch GATT packets.
+Enable `Debug Logging` in Settings to write received BLE data to macOS Unified Logging. The app logs decoded temperature/humidity/battery/RSSI values, raw advertisement bytes, and history-fetch GATT packets.
 
 View recent logs with:
 

@@ -1,6 +1,6 @@
 # BirdMenu Privacy Policy
 
-Last updated: June 29, 2026
+Last updated: September 21, 2026
 
 BirdMenu is a macOS menu bar app for displaying readings from compatible Bluetooth Low Energy thermometer/hygrometer sensors.
 
@@ -32,13 +32,15 @@ When you use the history fetch feature, BirdMenu writes files under:
 ~/Documents/BirdMenu Logs/
 ```
 
+In the App Store version, this Documents directory is inside BirdMenu’s macOS sandbox container. Choose **Open History Folder** from the BirdMenu menu to open the actual storage location.
+
 These files may include:
 
 - `raw-history.json`
 - `history.csv`
 - `history_yyyymmdd.png`
 
-If debug logging is enabled in the app menu, BirdMenu may also write received Bluetooth readings and packet details to macOS Unified Logging. These logs remain on your Mac and are managed by macOS.
+If debug logging is enabled in Settings, BirdMenu may also write received Bluetooth readings and packet details to macOS Unified Logging. These logs remain on your Mac and are managed by macOS.
 
 ## Data Sharing
 
@@ -54,7 +56,7 @@ BirdMenu requests Bluetooth access so it can discover and communicate with compa
 
 ## Data Deletion
 
-You can delete exported history files at any time by removing files from:
+You can delete exported history files at any time. Choose **Open History Folder** from the BirdMenu menu, then remove the files in Finder. The directory is:
 
 ```text
 ~/Documents/BirdMenu Logs/

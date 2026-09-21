@@ -41,8 +41,12 @@ enum AppText {
     static var cancelHistoryAndQuit: String { localized(en: "Save and Quit", ja: "保存して終了") }
     static var keepRunning: String { localized(en: "Keep Running", ja: "終了しない") }
     static var openHistoryFolder: String { localized(en: "Open History Folder", ja: "履歴フォルダを開く") }
-    static var about: String { localized(en: "About BirdMenu...", ja: "BirdMenuについて...") }
-    static var settings: String { localized(en: "Settings...", ja: "設定...") }
+    static var about: String { localized(en: "About BirdMenu", ja: "BirdMenuについて") }
+    static var settings: String { localized(en: "Settings…", ja: "設定…") }
+    static var privacyPolicy: String { localized(en: "Privacy Policy…", ja: "プライバシーポリシー…") }
+    static var privacyPolicyURL: URL {
+        URL(string: "https://github.com/rioriost/BirdMenu/blob/main/docs/PRIVACY.\(isJapanese ? "ja" : "en").md")!
+    }
     static var quit: String { localized(en: "Quit BirdMenu", ja: "BirdMenuを終了") }
     static var ok: String { localized(en: "OK", ja: "OK") }
 
@@ -67,13 +71,33 @@ enum AppText {
     static var couldNotOpenHistoryFolderTitle: String { localized(en: "Could Not Open History Folder", ja: "履歴フォルダを開けませんでした") }
 
     static var settingsTitle: String { localized(en: "BirdMenu Settings", ja: "BirdMenu設定") }
+    static var generalSettings: String { localized(en: "General", ja: "一般") }
+    static var diagnostics: String { localized(en: "Diagnostics", ja: "診断") }
+    static var debugLoggingDescription: String {
+        localized(en: "Record Bluetooth readings and communication details in this Mac’s system log for troubleshooting.", ja: "問題の調査用に、Bluetoothの測定値と通信内容をこのMacのシステムログに記録します。")
+    }
+    static var historyChartTitle: String { localized(en: "History Graph", ja: "履歴グラフ") }
+    static var openHistoryChart: String { localized(en: "History Graph…", ja: "履歴グラフ…") }
+    static var historyChartDescription: String {
+        localized(en: "Create a temperature and humidity graph from saved history. Choose a sensor and a date in your local time zone.", ja: "保存済みの履歴から温度・湿度のグラフを作成します。センサーと、このMacのタイムゾーンでの日付を選んでください。")
+    }
+    static var noSavedHistory: String {
+        localized(en: "No saved history yet. Choose Fetch Sensor History from the BirdMenu menu, then reopen this window.", ja: "保存済みの履歴がありません。BirdMenuメニューの「センサー履歴を取得」を実行してから、この画面を開き直してください。")
+    }
+    static var historyChartReady: String {
+        localized(en: "The PNG image will be saved in BirdMenu Logs. Existing sensor history will be kept.", ja: "PNG画像をBirdMenu Logsに保存します。保存済みのセンサー履歴は保持されます。")
+    }
+    static var showInFinder: String { localized(en: "Show in Finder", ja: "Finderで表示") }
+    static func historyChartSaved(_ count: Int) -> String {
+        localized(en: "Graph saved from \(count) records. Choose Show in Finder to view the PNG image.", ja: "\(count)件の記録からグラフを保存しました。「Finderで表示」からPNG画像を確認できます。")
+    }
     static var launchAtLogin: String { localized(en: "Launch at login", ja: "ログイン時に起動") }
     static var temperatureUnit: String { localized(en: "Temperature unit", ja: "温度単位") }
     static var celsius: String { localized(en: "Celsius", ja: "摂氏") }
     static var fahrenheit: String { localized(en: "Fahrenheit", ja: "華氏") }
     static var debugLogging: String { localized(en: "Debug logging", ja: "デバッグログ") }
-    static var historyChartDate: String { localized(en: "History chart date", ja: "履歴グラフの日付") }
-    static var historyChartSensor: String { localized(en: "History sensor", ja: "履歴センサー") }
+    static var historyChartDate: String { localized(en: "Date", ja: "日付") }
+    static var historyChartSensor: String { localized(en: "Sensor", ja: "センサー") }
     static var selectHistorySensor: String { localized(en: "Select a sensor", ja: "センサーを選択") }
     static var loadingHistorySensors: String { localized(en: "Loading saved sensors...", ja: "保存済みセンサーを読込中...") }
     static var generatingHistoryChart: String { localized(en: "Generating...", ja: "生成中...") }

@@ -31,6 +31,7 @@ final class StatusMenuController {
     private var isFetchingHistory: Bool { historyRequest.isFetching }
     private var historyStatus: HistoryDisplayStatus = .notFetched
     private var settingsWindowController: SettingsWindowController?
+    private var historyChartWindowController: HistoryChartWindowController?
 
     private static let selectedPeripheralDefaultsKey = "selectedPeripheralID"
 
@@ -42,6 +43,7 @@ final class StatusMenuController {
 
     init() {
         selectedPeripheralID = UserDefaults.standard.string(forKey: Self.selectedPeripheralDefaultsKey).flatMap(UUID.init(uuidString:))
+        configureApplicationMenu()
         configureStatusItem()
         configureScanner()
         NotificationCenter.default.addObserver(
@@ -60,6 +62,30 @@ final class StatusMenuController {
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+    }
+
+    private func configureApplicationMenu() {
+        let mainMenu = NSMenu()
+        let appItem = NSMenuItem()
+        let appMenu = NSMenu(title: "BirdMenu")
+        for item in [
+            NSMenuItem(title: AppText.settings, action: #selector(showSettings), keyEquivalent: ","),
+            NSMenuItem(title: AppText.openHistoryChart, action: #selector(showHistoryChart), keyEquivalent: "g"),
+            NSMenuItem(title: AppText.privacyPolicy, action: #selector(showPrivacyPolicy), keyEquivalent: ""),
+            NSMenuItem.separator(),
+            NSMenuItem(title: AppText.quit, action: #selector(quit), keyEquivalent: "q")
+        ] {
+            item.target = self
+            appMenu.addItem(item)
+        }
+        appItem.submenu = appMenu
+        mainMenu.addItem(appItem)
+        let windowItem = NSMenuItem()
+        let windowMenu = NSMenu(title: AppText.localized(en: "Window", ja: "ウインドウ"))
+        windowMenu.addItem(withTitle: AppText.localized(en: "Close", ja: "閉じる"), action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        windowItem.submenu = windowMenu
+        mainMenu.addItem(windowItem)
+        NSApplication.shared.mainMenu = mainMenu
     }
 
     private func configureStatusItem() {
@@ -133,7 +159,7 @@ final class StatusMenuController {
                     NSApplication.shared.reply(toApplicationShouldTerminate: shouldTerminate)
                     if shouldTerminate { return }
                 }
-                self.settingsWindowController?.refreshHistorySensors()
+                self.historyChartWindowController?.refreshHistorySensors()
                 switch result {
                 case let .success(history):
                     if HistoryUIRequestState.isEmptySuccess(history) {
@@ -178,6 +204,10 @@ final class StatusMenuController {
         NSWorkspace.shared.open(historyFolderURL)
     }
 
+    @objc private func showPrivacyPolicy() {
+        NSWorkspace.shared.open(AppText.privacyPolicyURL)
+    }
+
     @objc private func showAbout() {
         NSApplication.shared.activate(ignoringOtherApps: true)
         NSApplication.shared.orderFrontStandardAboutPanel(nil)
@@ -205,8 +235,21 @@ final class StatusMenuController {
         controller.show()
     }
 
+    @objc private func showHistoryChart() {
+        if historyChartWindowController == nil {
+            let controller = HistoryChartWindowController()
+            controller.onClose = { [weak self] in
+                self?.historyChartWindowController = nil
+            }
+            historyChartWindowController = controller
+        }
+        historyChartWindowController?.show()
+    }
+
     @objc private func localeDidChange() {
+        configureApplicationMenu()
         settingsWindowController?.reload()
+        historyChartWindowController?.reload()
         refresh()
     }
 
@@ -246,6 +289,7 @@ final class StatusMenuController {
         statusItem.button?.image = Self.statusImage(color: displayState.color)
         statusItem.button?.title = displayState.title
         statusItem.button?.toolTip = displayState.tooltip
+        statusItem.button?.setAccessibilityLabel("BirdMenu, \(displayState.title), \(displayState.statusText)")
 
         statusItemText.title = "\(AppText.status): \(displayState.statusText)"
         updateDetailItems()
@@ -341,20 +385,26 @@ final class StatusMenuController {
         let openHistoryFolderItem = NSMenuItem(title: AppText.openHistoryFolder, action: #selector(openLatestHistoryFolder), keyEquivalent: "")
         openHistoryFolderItem.target = self
         menu.addItem(openHistoryFolderItem)
+        let chartItem = NSMenuItem(title: AppText.openHistoryChart, action: #selector(showHistoryChart), keyEquivalent: "g")
+        chartItem.target = self
+        menu.addItem(chartItem)
 
         menu.addItem(NSMenuItem.separator())
         let aboutItem = NSMenuItem(title: AppText.about, action: #selector(showAbout), keyEquivalent: "")
         aboutItem.target = self
         menu.addItem(aboutItem)
+        let privacyItem = NSMenuItem(title: AppText.privacyPolicy, action: #selector(showPrivacyPolicy), keyEquivalent: "")
+        privacyItem.target = self
+        menu.addItem(privacyItem)
 
         menu.addItem(NSMenuItem.separator())
-        let settingsItem = NSMenuItem(title: AppText.settings, action: #selector(showSettings), keyEquivalent: "")
+        let settingsItem = NSMenuItem(title: AppText.settings, action: #selector(showSettings), keyEquivalent: ",")
         settingsItem.target = self
-        settingsItem.isEnabled = settingsWindowController == nil
+        settingsItem.isEnabled = true
         menu.addItem(settingsItem)
 
         menu.addItem(NSMenuItem.separator())
-        let quitItem = NSMenuItem(title: AppText.quit, action: #selector(quit), keyEquivalent: "")
+        let quitItem = NSMenuItem(title: AppText.quit, action: #selector(quit), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
     }
