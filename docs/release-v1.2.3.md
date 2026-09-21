@@ -27,4 +27,4 @@ Refined Settings and added a dedicated History Graph window. Improved keyboard n
 - App Sandbox and Bluetooth entitlements retained. Privacy Manifest declares no collected data or tracking and UserDefaults reason CA92.1.
 - [GUI validation](hig-gui-review-2026-09-21.md) records actual controller rendering and input checks, along with coverage limits.
 
-App Store upload, processing, build selection, and review status are tracked separately in the [preflight report](app-store-preflight-1.2.3.md). An archive alone does not establish upload or publication.
+App Store upload and processing completed, and build 17 was selected in the 1.2.3 draft on 2026-09-21. Review contact details and updated store screenshots remain outstanding; no review submission was performed. These stages are tracked separately in the [preflight report](app-store-preflight-1.2.3.md). An archive alone does not establish upload or publication.

@@ -4,17 +4,11 @@
 - Version / build: 1.2.3 / 17 (update)
 - Guidelines retrieved: 2026-09-21
 - Readiness: **NOT READY**
-- Counts: BLOCKER 3 / WARNING 1 / MANUAL 2 / PASS 5 / NOT APPLICABLE 1
+- Counts: BLOCKER 2 / WARNING 1 / MANUAL 2 / PASS 6 / NOT APPLICABLE 1
 
 This is a dated preparation record, not an approval or release certificate.
 
 ## Actionable findings
-
-### B1 — BLOCKER: App Store upload authentication
-
-The Release archive completed, but `xcodebuild -exportArchive` failed with `Failed to Use Accounts` and a request for App Store Connect account access. The browser session is authenticated; Xcode's upload session is not. No build is selected in the 1.2.3 draft. Refresh the Apple Account in Xcode Settings → Accounts, retry the export below, then verify processing and select build 17. The archive's current signature is Apple Development; successful distribution export/signing has not been established.
-
-Source: [Upload builds](https://developer.apple.com/help/app-store-connect/manage-builds/upload-builds/). This is a tooling prerequisite, not a finding of a Review Guideline violation.
 
 ### B2 — BLOCKER: Review contact incomplete
 
@@ -53,6 +47,7 @@ Production controllers were visually inspected in a local validation app in Japa
 | P3 | PASS | App Sandbox and Bluetooth entitlements retained. Login item registration remains user-controlled with SMAppService. No external executable installer or updater was added. |
 | P4 | PASS | Privacy Manifest declares no tracking/collected data and UserDefaults reason CA92.1. Source review found no advertising/analytics/backend integration. Published ASC privacy label states data not collected. Both public policy URLs resolve; localized in-app policy menu links were added. Runtime browser opening remains untested. |
 | P5 | PASS | ASC 1.2.3 draft created; English/Japanese release notes and updated review instructions saved. Existing categories Utilities/Weather, age rating 4+ (regional equivalents), standard EULA and no-third-party-content declaration observed. Release setting remains automatic after approval. |
+| P6 | PASS | Xcode reauthentication resolved the account failure. Export/upload succeeded on 2026-09-21 at 12:11 JST; ASC processing completed and TestFlight showed Ready to Submit. Build 1.2.3 (17) was selected and saved in the App Store version draft. |
 | N1 | NOT APPLICABLE | No IAP or subscription products appeared in their ASC sections; no StoreKit purchase flow in this app. UGC moderation, app accounts/account deletion, health claims, gambling, kids-directed features, and third-party login do not apply to the inspected feature set. |
 
 ## Coverage summary
@@ -60,7 +55,7 @@ Production controllers were visually inspected in a local validation app in Japa
 | Family | Status | Evidence or reason |
 |---|---|---|
 | Safety | PASS / N/A | Local environmental sensor utility; no social/UGC, medical or emergency claims in reviewed source and metadata. |
-| Performance | BLOCKER / MANUAL | Tests and archive pass; upload, review contact, screenshot accuracy, hardware operation remain outstanding (B1–B3, M1). |
+| Performance | BLOCKER / MANUAL | Tests and archive pass; review contact, screenshot accuracy, hardware operation remain outstanding (B2/B3, M1). |
 | Business | N/A / WARNING | No purchases/subscriptions. Pricing left unchanged. EU availability restriction W1 remains. |
 | Design | PASS / MANUAL | Standard AppKit Settings and task window; genuine sensor utility. Rendering/input evidence and limits recorded in M2 and GUI review. |
 | Legal | PASS / WARNING | Local data flow, policy paths and manifest checked. Existing rights declarations observed, not independently legally adjudicated. DSA restriction W1 remains. |
@@ -71,13 +66,13 @@ Policy source: [current App Review Guidelines](https://developer.apple.com/app-s
 
 - Source: `Sources/BirdMenu/`, `Resources/Info.plist`, `Resources/PrivacyInfo.xcprivacy`, entitlements, `project.yml`, `ExportOptions.appstore.plist`, tests, privacy policies and GUI evidence.
 - Audited local bundle: `build/BirdMenu-1.2.3-17.xcarchive/Products/Applications/BirdMenu.app`.
-- Local transient logs: `/tmp/birdmenu-release-tests.log`, `/tmp/birdmenu-release-archive.log`, `/tmp/birdmenu-release-upload.log`; scanner output `/tmp/birdmenu-preflight-final.json`. Ignored Python virtual-environment diagnostic bundles found by the recursive scanner are not part of the app and were excluded from conclusions.
+- Local transient logs: `/tmp/birdmenu-release-tests.log`, `/tmp/birdmenu-release-archive.log`, `/tmp/birdmenu-release-upload.log`, `/tmp/birdmenu-release-upload-signedin.log`; scanner output `/tmp/birdmenu-preflight-final.json`. Ignored Python virtual-environment diagnostic bundles found by the recursive scanner are not part of the app and were excluded from conclusions.
 - ASC app 6784264580: macOS 1.2.3 draft, prior 1.2.2 distributed version, App Information, Privacy, Pricing and Availability/region detail, In-App Purchases, Subscriptions. Actual inherited screenshot visually inspected. Accessibility product-page declarations were not audited.
 - English/Japanese notes: [release-v1.2.3.md](release-v1.2.3.md).
 
-## Resume upload
+## Upload record
 
-After account authentication is restored:
+The following command succeeded after the user signed in again in Xcode:
 
 ```sh
 xcodebuild -exportArchive \
@@ -87,12 +82,12 @@ xcodebuild -exportArchive \
   -allowProvisioningUpdates
 ```
 
-Then confirm successful upload and processing, select 1.2.3 (17), resolve B2/B3, and complete the manual checks appropriate to the release. Recheck live availability and submission state rather than relying on this dated record.
+Upload and build selection are complete. Resolve B2/B3, and complete the manual checks appropriate to the release. Recheck live availability and submission state rather than relying on this dated record.
 
 ## Final gate
 
-- Archive: complete. Export/upload: failed at account authentication. Processing: not established. Build selection: empty.
-- Audited artifact: the local archive above; there is no selected 1.2.3 build to audit in ASC yet.
+- Archive: complete. Export/upload: succeeded. Processing: complete. Build selection: 1.2.3 (17), build ID `b7b234a8-fe96-468f-8061-32c1f5c4672a`.
+- Audited artifact: the local archive above, uploaded without source changes and selected as 1.2.3 (17). The existing five-family review remains applicable; this follow-up verified upload, processing, selected build, and the outstanding draft fields, not new runtime qualification.
 - Current ASC version state: 1.2.3 **Prepare for Submission**; 1.2.2 remains the distributed version.
 - Unresolved manual confirmations: physical hardware/reviewer access and runtime/accessibility limits (M1/M2), plus regional trader information if EU distribution is intended.
 - **No submission action was performed.**
