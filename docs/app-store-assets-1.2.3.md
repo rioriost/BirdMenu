@@ -11,7 +11,11 @@ Each locale has two 1280×800 PNGs, in interface/chart order. These are captione
 - [Japanese interface](../images/appstore-1.2.3-ja-interface.png)
 - [Japanese chart](../images/appstore-1.2.3-ja-chart.png)
 
-The native captures include normal window chrome and standard AppKit controls. A local HTML/CSS layout adds captions and spacing; Computer Use browser screenshots produce the final files. Every image was visually inspected, and the initial chart layout was corrected to keep the complete axes and footer visible. The result dimensions match one of Apple's accepted [Mac screenshot sizes](https://developer.apple.com/help/app-store-connect/reference/app-information/screenshot-specifications/) (retrieved 2026-09-21). App Store Connect accepted the files; both localizations were checked after reload. The previous screenshot showing inline Debug Logging and Experimental history wording was removed from the draft.
+The native captures include normal window chrome and standard AppKit controls. A local HTML/CSS layout adds captions and spacing; Computer Use browser screenshots provide the image content. Every image was visually inspected, and the initial chart layout was corrected to keep the complete axes and footer visible. The result dimensions match one of Apple's accepted [Mac screenshot sizes](https://developer.apple.com/help/app-store-connect/reference/app-information/screenshot-specifications/) (retrieved 2026-09-21). The previous screenshot showing inline Debug Logging and Experimental history wording was removed from the draft.
+
+### Image-format correction
+
+The first upload mistakenly stored JPEG bytes under `.png` filenames. The earlier check saw persisted filenames but did not establish successful image processing; App Store Connect subsequently displayed red error placeholders. All four files were re-encoded as real PNG files with `sips`, retaining their dimensions and content. PNG signatures and IHDR values were independently checked: 1280×800, 8-bit RGB, no alpha. The failed uploads were replaced in both locales. Verification now includes actual server-rendered thumbnails after reload, rather than filename presence alone.
 
 ## Runtime checks
 
